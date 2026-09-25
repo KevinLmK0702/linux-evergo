@@ -35,6 +35,9 @@
 				 MTK_PULL_PUPD_R1R0_TYPE |\
 				 MTK_PULL_RSEL_TYPE)
 
+/* Only bit 0 of the eh register selects the i2c driving mode */
+#define MTK_EH_ENABLE_MASK	0xfffffffe
+
 #define EINT_NA	U16_MAX
 #define NO_EINT_SUPPORT	EINT_NA
 
@@ -67,6 +70,19 @@
 		.down_rsel = _down_rsel,				\
 	}
 
+/*
+ * SoCs having pins whose driving control depends on the selected pinmux
+ * (e.g. i2c pins) describe those (pin, pinmux) couples with this macro.
+ * The list must be sorted by pin and terminated by an entry whose @pin is
+ * MTK_EH_PIN_LIST_END.
+ */
+#define MTK_EH_PIN_LIST_END	0xffff
+
+#define PIN_MUX_EH(_pin, _pinmux) {					\
+		.pin = _pin,						\
+		.pinmux = _pinmux,				\
+	}
+
 /* List these attributes which could be modified for the pin */
 enum {
 	PINCTRL_PIN_REG_MODE,
@@ -88,6 +104,8 @@ enum {
 	PINCTRL_PIN_REG_IES,
 	PINCTRL_PIN_REG_PULLEN,
 	PINCTRL_PIN_REG_PULLSEL,
+	/* Driving control selection of the pins supporting the i2c mode */
+	PINCTRL_PIN_REG_DRV_EH,
 	PINCTRL_PIN_REG_DRV_EN,
 	PINCTRL_PIN_REG_DRV_E0,
 	PINCTRL_PIN_REG_DRV_E1,
@@ -205,6 +223,17 @@ struct mtk_eint_desc {
 };
 
 /**
+ * struct mtk_eh_pin_pinmux - entry recording the (pin, pinmux) couples for
+ *			      which the eh bit (i2c driving mode) is wanted
+ * @pin:		pin number
+ * @pinmux:		pinmux number
+ */
+struct mtk_eh_pin_pinmux {
+	u16 pin;
+	u16 pinmux;
+};
+
+/**
  * struct mtk_pin_desc - the structure that providing information
  *			       for each pin of chips
  * @number:		unique pin number from the global pin number space
@@ -252,6 +281,7 @@ struct mtk_pin_soc {
 	const unsigned int		*pull_type;
 	const struct mtk_pin_rsel	*pin_rsel;
 	unsigned int			npin_rsel;
+	const struct mtk_eh_pin_pinmux	*eh_pin_pinmux;
 
 	/* Specific pinconfig operations */
 	int (*bias_disable_set)(struct mtk_pinctrl *hw,
@@ -310,6 +340,9 @@ int mtk_hw_set_value(struct mtk_pinctrl *hw, const struct mtk_pin_desc *desc,
 		     int field, int value);
 int mtk_hw_get_value(struct mtk_pinctrl *hw, const struct mtk_pin_desc *desc,
 		     int field, int *value);
+
+void mtk_eh_ctrl(struct mtk_pinctrl *hw, const struct mtk_pin_desc *desc,
+		 u16 mode);
 
 int mtk_build_eint(struct mtk_pinctrl *hw, struct platform_device *pdev);
 

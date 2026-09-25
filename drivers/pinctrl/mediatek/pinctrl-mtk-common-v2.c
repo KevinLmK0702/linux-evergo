@@ -250,6 +250,58 @@ static int mtk_xt_find_eint_num(struct mtk_pinctrl *hw, unsigned long eint_n)
 	return EINT_NA;
 }
 
+void mtk_eh_ctrl(struct mtk_pinctrl *hw, const struct mtk_pin_desc *desc,
+		 u16 mode)
+{
+	const struct mtk_eh_pin_pinmux *p = hw->soc->eh_pin_pinmux;
+	u32 val = 0, on = 0;
+
+	while (p->pin != MTK_EH_PIN_LIST_END) {
+		if (desc->number == p->pin) {
+			if (mode == p->pinmux) {
+				on = 1;
+				break;
+			} else if (desc->number != (p + 1)->pin) {
+				/*
+				 * The target mode does not match the mode of the
+				 * current entry.
+				 *
+				 * Check the next entry if the pin number is the
+				 * same.
+				 * Yes: the target pin has more than one pinmux
+				 *    which shall enable eh, check the next entry.
+				 * No: the target pin has no other pinmux which
+				 *    shall enable eh, just disable eh.
+				 */
+				break;
+			}
+		}
+
+		/*
+		 * A pin may have more than one pinmux enabling eh and the list
+		 * is assumed sorted by pin, so as soon as the pin we are looking
+		 * for is lower than the current entry no match will be found and
+		 * we can leave.
+		 */
+		if (desc->number < p->pin)
+			return;
+
+		p++;
+	}
+
+	/* If the pin is not in the list, there is nothing to do */
+	if (p->pin == MTK_EH_PIN_LIST_END)
+		return;
+
+	(void)mtk_hw_get_value(hw, desc, PINCTRL_PIN_REG_DRV_EH, &val);
+	if (on)
+		val |= on;
+	else
+		val &= MTK_EH_ENABLE_MASK;
+	(void)mtk_hw_set_value(hw, desc, PINCTRL_PIN_REG_DRV_EH, val);
+}
+EXPORT_SYMBOL_GPL(mtk_eh_ctrl);
+
 /*
  * Virtual GPIO only used inside SOC and not being exported to outside SOC.
  * Some modules use virtual GPIO as eint (e.g. pmif or usb).
@@ -342,6 +394,9 @@ static int mtk_xt_set_gpio_as_eint(void *data, unsigned long eint_n)
 			       desc->eint.eint_m);
 	if (err)
 		return err;
+
+	if (hw->soc->eh_pin_pinmux)
+		mtk_eh_ctrl(hw, desc, desc->eint.eint_m);
 
 	err = mtk_hw_set_value(hw, desc, PINCTRL_PIN_REG_DIR, MTK_INPUT);
 	if (err)
@@ -1232,6 +1287,14 @@ int mtk_pinconf_adv_drive_set(struct mtk_pinctrl *hw,
 	int e0 = !!(arg & 2);
 	int e1 = !!(arg & 4);
 
+	/*
+	 * Only one of the eh table and the (en, e0, e1) table exists for a
+	 * given pin, so check the eh table first.
+	 */
+	err = mtk_hw_set_value(hw, desc, PINCTRL_PIN_REG_DRV_EH, arg);
+	if (!err)
+		return 0;
+
 	err = mtk_hw_set_value(hw, desc, PINCTRL_PIN_REG_DRV_EN, en);
 	if (err)
 		return err;
@@ -1252,6 +1315,14 @@ int mtk_pinconf_adv_drive_get(struct mtk_pinctrl *hw,
 {
 	u32 en, e0, e1;
 	int err;
+
+	/*
+	 * Only one of the eh table and the (en, e0, e1) table exists for a
+	 * given pin, so check the eh table first.
+	 */
+	err = mtk_hw_get_value(hw, desc, PINCTRL_PIN_REG_DRV_EH, val);
+	if (!err)
+		return 0;
 
 	err = mtk_hw_get_value(hw, desc, PINCTRL_PIN_REG_DRV_EN, &en);
 	if (err)

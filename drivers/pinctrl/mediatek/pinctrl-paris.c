@@ -106,11 +106,19 @@ static int mtk_pinmux_gpio_request_enable(struct pinctrl_dev *pctldev,
 {
 	struct mtk_pinctrl *hw = pinctrl_dev_get_drvdata(pctldev);
 	const struct mtk_pin_desc *desc;
+	int err;
 
 	desc = (const struct mtk_pin_desc *)&hw->soc->pins[pin];
 
-	return mtk_hw_set_value(hw, desc, PINCTRL_PIN_REG_MODE,
-				hw->soc->gpio_m);
+	err = mtk_hw_set_value(hw, desc, PINCTRL_PIN_REG_MODE,
+			       hw->soc->gpio_m);
+	if (err)
+		return err;
+
+	if (hw->soc->eh_pin_pinmux)
+		mtk_eh_ctrl(hw, desc, hw->soc->gpio_m);
+
+	return 0;
 }
 
 static int mtk_pinmux_gpio_set_direction(struct pinctrl_dev *pctldev,
@@ -750,6 +758,7 @@ static int mtk_pmx_set_mux(struct pinctrl_dev *pctldev,
 	const struct mtk_func_desc *desc_func;
 	const struct mtk_pin_desc *desc;
 	bool ret;
+	int err;
 
 	ret = mtk_pctrl_is_function_valid(hw, grp->pin, function);
 	if (!ret) {
@@ -763,7 +772,20 @@ static int mtk_pmx_set_mux(struct pinctrl_dev *pctldev,
 		return -EINVAL;
 
 	desc = (const struct mtk_pin_desc *)&hw->soc->pins[grp->pin];
-	return mtk_hw_set_value(hw, desc, PINCTRL_PIN_REG_MODE, desc_func->muxval);
+
+	err = mtk_hw_set_value(hw, desc, PINCTRL_PIN_REG_MODE,
+			       desc_func->muxval);
+	if (err)
+		return err;
+
+	/*
+	 * Pins whose driving control depends on the selected pinmux (e.g. i2c
+	 * pins) need their eh bit updated as well.
+	 */
+	if (hw->soc->eh_pin_pinmux)
+		mtk_eh_ctrl(hw, desc, desc_func->muxval);
+
+	return 0;
 }
 
 static const struct pinmux_ops mtk_pmxops = {

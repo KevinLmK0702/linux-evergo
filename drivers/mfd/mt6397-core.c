@@ -365,14 +365,25 @@ static int mt6397_probe(struct platform_device *pdev)
 	/*
 	 * mt6397 MFD is child device of soc pmic wrapper.
 	 * Regmap is set from its parent.
+	 *
+	 * Both of the early returns below used to be silent, which on the evergo
+	 * made "the PMIC never appeared" indistinguishable from "the MFD was
+	 * never probed at all": an empty deferred list, no error and no
+	 * regulators.  Say what happened instead.
 	 */
 	pmic->regmap = dev_get_regmap(pdev->dev.parent, NULL);
-	if (!pmic->regmap)
+	if (!pmic->regmap) {
+		dev_err(&pdev->dev, "PMIC MFD probe: no regmap on parent %s\n",
+			pdev->dev.parent ? dev_name(pdev->dev.parent) : "(none)");
 		return -ENODEV;
+	}
 
 	pmic_core = of_device_get_match_data(&pdev->dev);
-	if (!pmic_core)
+	if (!pmic_core) {
+		dev_err(&pdev->dev, "PMIC MFD probe: no match data for %pOF\n",
+			pdev->dev.of_node);
 		return -ENODEV;
+	}
 
 	ret = regmap_read(pmic->regmap, pmic_core->cid_addr, &id);
 	if (ret) {

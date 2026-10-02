@@ -188,6 +188,42 @@ config ARCH_MEDIATEK
 	  This enables support for MediaTek MT27xx, MT65xx, MT76xx
 	  & MT81xx ARMv8 SoCs
 
+config MT6833_EVERGO_FORCE_DT
+	bool "Force the embedded MT6833 evergo device tree (bring-up)"
+	depends on ARCH_MEDIATEK
+	depends on FW_LOADER
+	help
+	  The Little Kernel (LK) bootloader of the Xiaomi Redmi Note 11 5G
+	  (evergo, MT6833P) replaces the device tree found in the boot image
+	  with one it composes itself, because its own display and lcm code
+	  needs the vendor panel data. A mainline kernel therefore never sees
+	  the device tree it was booted with.
+
+	  Say Y to look up the device tree embedded through
+	  CONFIG_EXTRA_FIRMWARE (set to "mt6833-xiaomi-evergo.dtb") and use it
+	  in place of the one handed over by the bootloader. Note that the
+	  bootloader's initrd and command line additions are then ignored as
+	  well, so CONFIG_INITRAMFS_SOURCE should provide the initramfs.
+config MT6833_EVERGO_WDT
+       bool "Take over the MT6833 evergo watchdog early"
+       depends on ARCH_MEDIATEK
+       help
+         The preloader/LK of the Xiaomi Redmi Note 11 5G (evergo, MT6833P)
+         leave the top reset generator watchdog armed with a timeout short
+         enough to fire in the middle of the boot, and no mainline driver is
+         bound that early.  This used to be worked around by disarming the
+         watchdog from setup_arch(), which removed the spurious resets but also
+         left the board with no way to recover from a hang that happens before
+         userspace is up: the machine just sits there until the power button is
+         held down, and a forced power-off risks dropping DRAM and with it the
+         log ring.
+
+         Say Y to instead reload the watchdog with the longest timeout the
+         hardware offers (31 s) and keep it armed with the system reset action
+         enabled.  mtk_wdt_probe() then sees it running, marks the device
+         WDOG_HW_RUNNING, and CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED keeps it fed
+         until userspace opens /dev/watchdog, so a normal boot is unaffected
+         while a hang resets the SoC on its own.
 config ARCH_MESON
 	bool "Amlogic Platforms"
 	help

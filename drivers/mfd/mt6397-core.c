@@ -385,6 +385,9 @@ static int mt6397_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
+	dev_info(&pdev->dev, "PMIC MFD probe: parent regmap ok, cid_addr=%#x\n",
+		 pmic_core->cid_addr);
+
 	ret = regmap_read(pmic->regmap, pmic_core->cid_addr, &id);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to read chip id: %d\n", ret);

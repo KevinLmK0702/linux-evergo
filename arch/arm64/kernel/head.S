@@ -82,7 +82,141 @@
 	 *  x20        primary_entry() .. __primary_switch()    CPU boot mode
 	 *  x21        primary_entry() .. start_kernel()        FDT pointer passed at boot in x0
 	 */
+#ifdef CONFIG_MT6833_EVERGO_FORCE_DT
+/*
+ * evergo bring-up probes.
+ *
+ * The board has no UART and printk only reaches pstore once ramoops has
+ * registered, so a kernel that dies early leaves no trace at all - which is
+ * indistinguishable from a kernel that never ran.
+ *
+ * These probes build a "DBGC" record in the DRAM window at 0x48090000, which
+ * is the format the MTK LK looks for when it copies that area into the expdb
+ * partition (same layout the vendor ram console and evergo_mark() use):
+ *
+ *      +0x00  magic "DBGC"
+ *      +0x04  0
+ *      +0x08  length of the payload
+ *      +0x0c  payload (ASCII)
+ *
+ * Each checkpoint stores its own 4-byte tag ("EVM0".."EVM4") at its slot and
+ * updates the length, so the highest tag present - and the length - show how
+ * far the kernel got.  The MMU is still off, so these are plain physical
+ * stores.  Only x4/x5/x6 are clobbered.
+ *
+ * evergo_sram() is the more reliable half of the pair: it stamps the ram
+ * console "fiq_step" field in SRAM (0x11d000 + 0x3c), which the MTK LK prints
+ * on every single boot ("RAM_CONSOLE. wdt_status 0x?, fiq_step 0x?, ...").
+ * fiq_step is always 0x0 in factory logs, so any non-zero value is proof that
+ * this code ran - and because each checkpoint writes a bigger number, the
+ * highest value seen tells us exactly where the kernel died.  It is written
+ * FIRST, before any DRAM access: a DRAM store can be blocked by the EMI MPU,
+ * an SRAM store cannot.
+ *
+ * Values: 0xa1..0xaf = arch/arm64/kernel/head.S, 0xb1.. = setup.c.
+ */
+	.macro	evergo_sram, val
+	movz	x4, #0xd000
+	movk	x4, #0x0011, lsl #16		// x4 = 0x11d000 (ram console, SRAM)
+	movz	w5, #\val
+	str	w5, [x4, #0x3c]			// fiq_step = progress marker
+	mov	w5, #6
+	str	w5, [x4, #0x40]			// exp_type = 6 (what LK expects)
+	.endm
+
+	.macro	evergo_sram_only, val
+	movz	x4, #0xd000
+	movk	x4, #0x0011, lsl #16
+	movz	w5, #\val
+	str	w5, [x4, #0x3c]
+	.endm
+
+/*
+ * evergo_tick_h - stamp a progress tick into the MTK LK/preloader log ring.
+ *
+ * LK keeps its own log in a 256 KiB ring at 0x7ffbf000 (its "log_store"
+ * mblock, map:1, so the normal world may touch it) and copies that whole
+ * buffer into the expdb partition at the end of every session:
+ *
+ *	LK_LOG_STORE: dram pl/lk log buff mapping start addr = 0x7ffbf000, size = 0x40000
+ *	LK_LOG_STORE: start save pllk log
+ *
+ * The ring is plain DRAM, it accumulates across watchdog resets and LK flushes
+ * it on its own - so a stamp left by the kernel is readable afterwards even
+ * when nothing else works.  This is the only channel that survives a death in
+ * the first instructions, which is exactly where this port was dying.  Stamp
+ * every 4 KiB so it lands wherever LK's write pointer happens to be; with the
+ * MMU off these are raw physical stores.  The value grows with every
+ * checkpoint, so the highest one seen in a read-back is the death point.
+ */
+	.macro	evergo_tick_h, val
+	movz	x4, #0xf000
+	movk	x4, #0x7ffb, lsl #16		// x4 = 0x7ffbf000 (LK log ring)
+	add	x7, x4, #0x40000		// end of the ring
+	movz	x6, #0x5645			// "EV"
+	movk	x6, #0x4954, lsl #16		// "TI"
+	movk	x6, #0x4b43, lsl #32		// "CK"
+	movk	x6, #0x003a, lsl #48		// ":"  -> "EVTICK:"
+	movz	w5, #\val
+1:	str	x6, [x4]
+	str	w5, [x4, #8]
+	add	x4, x4, #0x1000
+	cmp	x4, x7
+	b.lo	1b
+	.endm
+
+	.macro	evergo_dbgc, half, idx
+	movz	x4, #0x0000
+	movk	x4, #0x4809, lsl #16		// x4 = 0x48090000 (pstore window)	movz	w6, #0x4244
+	movk	w6, #0x4347, lsl #16		// "DBGC"
+	str	w6, [x4]			// magic
+	str	wzr, [x4, #4]
+	mov	w6, #(4 * (\idx + 1))
+	str	w6, [x4, #8]			// payload length
+	movz	w5, #0x5645			// 'E','V'
+	movk	w5, #\half, lsl #16		// -> "EVM<n>"
+	str	w5, [x4, #(12 + 4 * \idx)]
+	.endm
+
+/*
+ * evergo_stamp_h - build-specific stamp in the LK log ring.
+ *
+ * The "EVTICK:" and "EVM<n>" breadcrumbs are byte-identical in every build,
+ * so a read-back of the ring cannot tell *which* image left them - and the
+ * ring also still holds the previous session's text, because DRAM is not
+ * cleared by a warm reset.  This stamp is unique per build, so its presence
+ * in a read-back proves that THIS build's first instruction executed; if it
+ * is absent, the image never ran at all (the bootloader did not jump to it).
+ *
+ * Written at +0x40 inside each 4 KiB ring slot so evergo_tick_h() (offset 0,
+ * the same slots) cannot overwrite it.
+ */
+	.macro	evergo_stamp_h, a, b, c, d
+	movz	x4, #0xf000
+	movk	x4, #0x7ffb, lsl #16		// x4 = 0x7ffbf000 (LK log ring)
+	add	x7, x4, #0x40000		// end of the ring
+	movz	x6, #\a
+	movk	x6, #\b, lsl #16
+	movk	x6, #\c, lsl #32
+	movk	x6, #\d, lsl #48
+2:	str	x6, [x4, #0x40]
+	add	x4, x4, #0x1000
+	cmp	x4, x7
+	b.lo	2b
+	/* same tag in the DBGC/pstore window, a different physical area */
+	movz	x4, #0x0000
+	movk	x4, #0x4809, lsl #16
+	str	x6, [x4, #0x100]
+	.endm
+#endif
+
 SYM_CODE_START(primary_entry)
+#ifdef CONFIG_MT6833_EVERGO_FORCE_DT
+	evergo_stamp_h 0x5645, 0x5245, 0x4f47, 0x3737	// "EVERGO77"
+	evergo_sram 0xa1			// SRAM first, it cannot fault on a mapping
+	evergo_tick_h 0xa1			// and the LK log ring, the channel that works
+	evergo_dbgc 0x304d, 0			// EVM0
+#endif
 	bl	record_mmu_state
 	bl	preserve_boot_args
 
@@ -92,6 +226,10 @@ SYM_CODE_START(primary_entry)
 	adrp	x0, __pi_init_idmap_pg_dir
 	mov	x1, xzr
 	bl	__pi_create_init_idmap
+#ifdef CONFIG_MT6833_EVERGO_FORCE_DT
+	evergo_tick_h 0xa2
+	evergo_dbgc 0x314d, 1			// EVM1: idmap page tables built
+#endif
 
 	/*
 	 * If the page tables have been populated with non-cacheable
@@ -117,8 +255,16 @@ SYM_CODE_START(primary_entry)
 	blr	x2
 
 1:	mov	x0, x19
+#ifdef CONFIG_MT6833_EVERGO_FORCE_DT
+	evergo_tick_h 0xa3
+	evergo_dbgc 0x324d, 2			// EVM2: entering init_kernel_el
+#endif
 	bl	init_kernel_el			// w0=cpu_boot_mode
 	mov	x20, x0
+#ifdef CONFIG_MT6833_EVERGO_FORCE_DT
+	evergo_tick_h 0xa4
+	evergo_dbgc 0x334d, 3			// EVM3: init_kernel_el returned
+#endif
 
 	/*
 	 * The following calls CPU setup code, see arch/arm64/mm/proc.S for
@@ -127,6 +273,10 @@ SYM_CODE_START(primary_entry)
 	 * the TCR will have been set.
 	 */
 	bl	__cpu_setup			// initialise processor
+#ifdef CONFIG_MT6833_EVERGO_FORCE_DT
+	evergo_tick_h 0xa5
+	evergo_dbgc 0x344d, 4			// EVM4: __cpu_setup done, about to enable MMU
+#endif
 	b	__primary_switch
 SYM_CODE_END(primary_entry)
 

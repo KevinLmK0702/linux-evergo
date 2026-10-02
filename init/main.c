@@ -113,6 +113,7 @@
 #include <asm/io.h>
 #include <asm/setup.h>
 #include <asm/sections.h>
+#include <asm/evergo.h>
 #include <asm/cacheflush.h>
 
 #define CREATE_TRACE_POINTS
@@ -1010,6 +1011,7 @@ void start_kernel(void)
 	mm_core_init_early();
 	/* Static keys and static calls are needed by LSMs */
 	jump_label_init();
+	evergo_mark("EVM:M1\n");
 	static_call_init();
 	early_security_init();
 	setup_boot_config();
@@ -1023,6 +1025,7 @@ void start_kernel(void)
 	print_kernel_cmdline(saved_command_line);
 	/* parameters may set static keys */
 	parse_early_param();
+	evergo_mark("EVM:M2\n");
 	after_dashes = parse_args("Booting kernel",
 				  static_command_line, __start___param,
 				  __stop___param - __start___param,
@@ -1047,6 +1050,7 @@ void start_kernel(void)
 	sort_main_extable();
 	trap_init();
 	mm_core_init();
+	evergo_mark("EVM:M3\n");
 	maple_tree_init();
 	poking_init();
 	ftrace_init();
@@ -1060,6 +1064,7 @@ void start_kernel(void)
 	 * time - but meanwhile we still have a functioning scheduler.
 	 */
 	sched_init();
+	evergo_mark("EVM:M4\n");
 
 	if (WARN(!irqs_disabled(),
 		 "Interrupts were enabled *very* early, fixing it\n"))
@@ -1092,6 +1097,7 @@ void start_kernel(void)
 	/* init some links before init_ISA_irqs() */
 	early_irq_init();
 	init_IRQ();
+	evergo_mark("EVM:M5-irq\n");
 	tick_init();
 	rcu_init_nohz();
 	timers_init();
@@ -1101,6 +1107,7 @@ void start_kernel(void)
 	vdso_setup_data_pages();
 	timekeeping_init();
 	time_init();
+	evergo_mark("EVM:M6-time\n");
 
 	/* This must be after timekeeping is initialized */
 	random_init();
@@ -1125,6 +1132,16 @@ void start_kernel(void)
 	 * this. But we do want output early, in case something goes wrong.
 	 */
 	console_init();
+	evergo_mark("EVM:M7-console\n");
+	/*
+	 * Now that console_init() has run, hand printk our own console: it mirrors
+	 * every message into the MTK LK log ring, which is the only channel this
+	 * board has (no UART, and LK only dumps the pstore area on abnormal
+	 * boots).  CON_PRINTBUFFER makes printk replay everything from the start
+	 * of the buffer, so the early boot log lands there too.
+	 */
+	evergo_console_init();
+	evergo_mark("EVM:M8-ring-console\n");
 	if (panic_later)
 		panic("Too many boot %s vars at `%s'", panic_later,
 		      panic_param);
@@ -1561,6 +1578,7 @@ static int __ref kernel_init(void *unused)
 	 * Wait until kthreadd is all set-up.
 	 */
 	wait_for_completion(&kthreadd_done);
+	evergo_mark("EVM:M9-kinit\n");
 
 	kernel_init_freeable();
 	/* need to finish all async __init code before freeing the memory */

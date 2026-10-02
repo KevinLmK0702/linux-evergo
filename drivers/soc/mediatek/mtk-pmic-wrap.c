@@ -1538,6 +1538,27 @@ static bool pwrap_is_fsm_idle_and_sync_idle(struct pmic_wrapper *wrp)
 		(val & PWRAP_STATE_SYNC_IDLE0);
 }
 
+/*
+ * A WACS2 transaction failed.  Print the registers that say why: if the
+ * command we wrote does not read back, the window is not accepting writes at
+ * all (0xC20/0xC24/0xC28 all read zero on the evergo, even though the wrapper
+ * looks enabled at 0x000); if it does read back but the FSM never reaches
+ * WFVLDCLR, the PMIC side of the transfer is the problem instead.
+ */
+static void pwrap_xfer_fail(struct pmic_wrapper *wrp, const char *what,
+			    u32 adr, u32 cmd)
+{
+	u32 rdata = pwrap_readl(wrp, PWRAP_WACS2_RDATA);
+
+	dev_err(wrp->dev,
+		"%s adr=%#x cmd=%#x: STA=%#x fsm=%#x cmd_still=%#x | "
+		"SWINF_2_RDATA_31_0=%#x INIT_DONE=%#x\n",
+		what, adr, cmd, rdata, PWRAP_GET_WACS_FSM(rdata),
+		pwrap_readl(wrp, PWRAP_WACS2_CMD),
+		pwrap_readl(wrp, PWRAP_SWINF_2_RDATA_31_0),
+		pwrap_readl(wrp, PWRAP_INIT_DONE2));
+}
+
 static int pwrap_read16(struct pmic_wrapper *wrp, u32 adr, u32 *rdata)
 {
 	bool tmp;
@@ -1547,6 +1568,7 @@ static int pwrap_read16(struct pmic_wrapper *wrp, u32 adr, u32 *rdata)
 	ret = readx_poll_timeout(pwrap_is_fsm_idle, wrp, tmp, tmp,
 				 PWRAP_POLL_DELAY_US, PWRAP_POLL_TIMEOUT_US);
 	if (ret) {
+		pwrap_xfer_fail(wrp, "read16: not idle", adr, 0);
 		pwrap_leave_fsm_vldclr(wrp);
 		return ret;
 	}
@@ -1559,8 +1581,10 @@ static int pwrap_read16(struct pmic_wrapper *wrp, u32 adr, u32 *rdata)
 
 	ret = readx_poll_timeout(pwrap_is_fsm_vldclr, wrp, tmp, tmp,
 				 PWRAP_POLL_DELAY_US, PWRAP_POLL_TIMEOUT_US);
-	if (ret)
+	if (ret) {
+		pwrap_xfer_fail(wrp, "read16: no vldclr", adr, val);
 		return ret;
+	}
 
 	if (HAS_CAP(wrp->master->caps, PWRAP_CAP_ARB))
 		val = pwrap_readl(wrp, PWRAP_SWINF_2_RDATA_31_0);

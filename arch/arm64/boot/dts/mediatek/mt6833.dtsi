@@ -305,11 +305,27 @@
 		};
 
 		pwrap: pwrap@10026000 {
-			compatible = "mediatek,mt6833-pwrap";
+			/*
+			 * The MT6873 wrapper is the same generation as the MT6833 one
+			 * and is what mainline has data for; the driver has no
+			 * mt6833 entry yet.
+			 */
+			compatible = "mediatek,mt6833-pwrap", "mediatek,mt6873-pwrap";
 			reg = <0 0x10026000 0 0x1000>;
 			reg-names = "pwrap";
 			interrupts = <GIC_SPI 220 IRQ_TYPE_LEVEL_HIGH>;
-			clocks = <&clk26m>;
+			/*
+			 * Only the two APB gates are listed.  The vendor DT also adds
+			 * CLK_TOP_PWRAP_ULPOSC_SEL and CLK_TOP_OSC_D10 ("ulposc",
+			 * "ulposc_osc") and on paper the gates are useless without
+			 * them, because they only branch off fpwrap_ulposc_ck.  On
+			 * this board listing them makes the boot worse instead of
+			 * fixing the wrapper, so the tree keeps the combination that
+			 * is known to boot and the clock chain is poked from
+			 * userspace by hand (see 'pwclk' in the bring-up init).
+			 */
+			clocks = <&infracfg_ao CLK_IFRAO_PMIC_AP>,
+				 <&infracfg_ao CLK_IFRAO_PMIC_TMR>;
 			clock-names = "spi", "wrap";
 			status = "disabled";
 		};
@@ -371,9 +387,18 @@
 			reg = <0 0x11200000 0 0x10000>;
 			interrupts = <GIC_SPI 96 IRQ_TYPE_LEVEL_HIGH>;
 			interrupt-names = "mc";
+			/*
+			 * clk26m placeholders on purpose.  The real clocks
+			 * (CLK_IFRAO_SSUSB, CLK_APMIXED_USBPLL,
+			 * CLK_TOP_UNIVPLL_D5_D4) are the right ones on paper and
+			 * the 48 MHz SIE clock is a hard requirement, but enabling
+			 * them is not harmless here: the board boots with the
+			 * placeholders and does not with the real ones, so they
+			 * stay commented out until whatever that breaks is found.
+			 */
 			clocks = <&clk26m>, <&clk26m>, <&clk26m>;
-			     //	   <&infracfg_ao CLK_IFRAO_SSUSB>,
-			     //    <&apmixed CLK_APMIXED_USBPLL>,
+			     //    <&infracfg_ao CLK_IFRAO_SSUSB>,
+			     //    <&apmixedsys CLK_APMIXED_USBPLL>,
 			     //    <&topckgen CLK_TOP_UNIVPLL_D5_D4>;
 			clock-names = "main",
 				      "mcu",
@@ -389,7 +414,8 @@
 
 		u2phy: t-phy@11e40000 {
 			compatible = "mediatek,mt6833-tphy", "mediatek,generic-tphy-v2";
-			ranges = <0 0x11e40000 0 0x10000>;
+			/* child addrs are 1 cell, parent (soc) addrs are 2 cells */
+			ranges = <0 0 0x11e40000 0x10000>;
 			#address-cells = <1>;
 			#size-cells = <1>;
 			status = "disabled";
@@ -423,10 +449,8 @@
 			reg = <0 0x11240000 0 0x1000>,
 			      <0 0x11ef0000 0 0x1000>;
 			interrupts = <GIC_SPI 103 IRQ_TYPE_LEVEL_HIGH>;
+			/* BISECT: same revert as the USB node above */
 			clocks = <&clk26m>, <&clk26m>, <&clk26m>;
-				/* <&topckgen CLK_TOP_MSDC30_1_SEL>,
-			           <&infracfg_ao CLK_IFRAO_MSDC1>,
-				   <&infracfg_ao CLK_IFRAO_MSDC1_SRC>; */
 			clock-names = "source", "hclk", "source_cg";
 			status = "disabled";
 		};
@@ -551,7 +575,7 @@
 			#clock-cells=<1>;
 		};
 
-		/*ufsphy: ufsphy@11fa0000 {
+		ufsphy: ufs-phy@11fa0000 {
 			compatible = "mediatek,mt6833-ufsphy", 
 				     "mediatek,mt8183-ufsphy";
 			reg = <0 0x11fa0000 0 0xc000>;
@@ -594,17 +618,15 @@
 				<0 0>,
 				<0 0>;
 
-			resets = <>
-			reset-names = "";
-
-			vcc-supply = <&mt_pmic_vemc_ldo_reg>;
-			vcc-fixed-regulator;
-
-
-
+			/*
+			 * MT6833 keeps only VCC under software control (the MT6359's
+			 * VEMC rail); VCCQ/VCCQ2 are fed by an always-on external LDO.
+			 */
+			vcc-supply = <&mt6359_vemc_ldo_reg>;
+			status = "disabled";
 		};
 
-		 iommu0: m4u@14016000 {
+		/*iommu0: m4u@14016000 {
 			compatible = "mediatek,iommu_v0";
 			reg = <0 0x14016000 0 0x1000>;
 			mediatek,larbs = <&smi_larb0 &smi_larb1 &smi_larb2>,

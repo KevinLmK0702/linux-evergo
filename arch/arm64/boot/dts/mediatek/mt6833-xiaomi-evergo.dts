@@ -16,9 +16,11 @@
 
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
+#include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/pinctrl/mediatek,mt6833-pinfunc.h>
 
 #include "mt6833.dtsi"
+#include "mt6359.dtsi"
 
 / {
 	chassis-type = "handset";
@@ -38,25 +40,26 @@
 		 * UART0 is the only reliable observation point during
 		 * bring-up, so the console is kept on it.
 		 */
-		bootargs = "earlycon=mtk8250,0x11002000 console=ttyS0,921600n8 console=tty0 clk_ignore_unused regulator_ignore_unused pd_ignore_unused PMOS_NOSPLASH";
+		bootargs = "earlycon=mtk8250,0x11002000 console=evenring console=ttyS0,921600n8 loglevel=8 ignore_loglevel printk.devkmsg=on clk_ignore_unused pd_ignore_unused panic=10 hardlockup_panic=1 softlockup_panic=1";
 		stdout-path = "serial0:921600n8";
 	};
 
 	/*
-	 * FIXME: the DRAM size depends on the evergo variant (4/6/8 GiB) and
-	 * is expected to be fixed up by the bootloader. 4 GiB is used as a
-	 * conservative default until this is confirmed.
+	 * LK reports the DRAM it trained in /memory of the DT it hands over;
+	 * this unit is an 8 GiB one. Keep this in sync with the variant in use
+	 * (4/6/8 GiB evergo variants exist).
 	 */
 	memory: memory@40000000 {
 		device_type = "memory";
-		reg = <0 0x40000000 1 0x00000000>;
+		reg = <0 0x40000000 2 0x00000000>;
 	};
 
 	/*
-	 * FIXME: these regions were copied from the MT6833 layout used by the
-	 * camellia bring-up. They still have to be verified against the evergo
-	 * firmware/expdb: overlapping the TEE/ATF/GZ regions makes the kernel
-	 * die before the console is initialized, which is very hard to debug.
+	 * The regions below match exactly what the MT6833 LK of the evergo
+	 * injects into the DT it hands to the kernel (its mblock-N-* entries,
+	 * dumped from a running device). Do not change them lightly: a wrong
+	 * TEE/ATF/GZ region makes the kernel die before the console is up.
+	 * The LK also fixes up the DRAM size in /memory.
 	 */
 	reserved-memory {
 		#address-cells = <2>;
@@ -69,9 +72,8 @@
 		};
 
 		/* Framebuffer shared with the bootloader (LK) */
-		framebuffer_reserved: memory@7ba10000 {
-			reg = <0 0x7ba10000 0 0x1df0000>;
-			no-map;
+		framebuffer_reserved: memory@7c610000 {
+			reg = <0 0x7c610000 0 0x1df0000>;
 		};
 
 		minirdump: memory@48170000 {
@@ -79,8 +81,31 @@
 			no-map;
 		};
 
-		pstore: memory@48090000 {
+		/*
+		 * LK keeps its AEE/ramoops buffer here; this is our only way to see
+		 * kernel output after a crash (read /sys/fs/pstore on the next boot).
+		 */
+		/*
+		 * Pstore/ramoops console area. The MTK LK copies it into the expdb
+		 * partition on the next boot, which is the only way to read kernel
+		 * output on a board without UART. The first bytes are also used for
+		 * early breadcrumbs by arch/arm64/kernel/setup.c before the ramoops
+		 * driver exists.
+		 *
+		 * Same zones as the vendor kernel asks for on its command line
+		 * (console 0x40000 then pmsg 0x10000, no record-size: that would
+		 * shift both), so the layout matches what Android expects as well.
+		 */
+		ramoops@48090000 {
+			compatible = "ramoops";
 			reg = <0 0x48090000 0 0xe0000>;
+			no-map;
+			console-size = <0x40000>;
+			pmsg-size = <0x10000>;
+		};
+
+		aee_debug_kinfo: memory@48080000 {
+			reg = <0 0x48080000 0 0x10000>;
 			no-map;
 		};
 
@@ -89,18 +114,18 @@
 			no-map;
 		};
 
-		mcupm_reserved: memory@7e900000 {
-			reg = <0 0x7e900000 0 0x100000>;
+		mcupm_reserved: memory@7f500000 {
+			reg = <0 0x7f500000 0 0x100000>;
 			no-map;
 		};
 
 		tee_reserved: memory@70000000 {
-			reg = <0 0x70000000 0 0x5000000>;
+			reg = <0 0x70000000 0 0x5b00000>;
 			no-map;
 		};
 
-		tee_ree_reserved: memory@7d800000 {
-			reg = <0 0x7d800000 0 0xc00000>;
+		tee_ree_reserved: memory@7e400000 {
+			reg = <0 0x7e400000 0 0xc00000>;
 			no-map;
 		};
 
@@ -114,8 +139,8 @@
 			no-map;
 		};
 
-		tee_secmem: memory@7e400000 {
-			reg = <0 0x7e400000 0 0x400000>;
+		tee_secmem: memory@7f000000 {
+			reg = <0 0x7f000000 0 0x400000>;
 			no-map;
 		};
 
@@ -124,8 +149,8 @@
 			no-map;
 		};
 
-		atf_ramdump_reserved: memory@bff70000 {
-			reg = <0 0xbff70000 0 0x80000>;
+		atf_ramdump_reserved: memory@bff80000 {
+			reg = <0 0xbff80000 0 0x80000>;
 			no-map;
 		};
 
@@ -138,17 +163,28 @@
 			reg = <0 0x7ffbf000 0 0x40000>;
 		};
 
-		gz_log: memory@7e800000 {
-			reg = <0 0x7e800000 0 0x41000>;
+		gz_log: memory@7f400000 {
+			reg = <0 0x7f400000 0 0x41000>;
 		};
 
-		gz: memory@7ea00000 {
-			reg = <0 0x7ea00000 0 0x1400000>;
+		gz: memory@7f600000 {
+			reg = <0 0x7f600000 0 0x800000>;
 			no-map;
 		};
 
 		emi_mbist_buf: memory@7ffff000 {
 			reg = <0 0x7ffff000 0 0x1000>;
+			no-map;
+		};
+
+		/* DDR rank markers reserved by LK */
+		dramc_rk0: memory@13ffff000 {
+			reg = <1 0x3ffff000 0 0x1000>;
+			no-map;
+		};
+
+		dramc_rk1: memory@23ffff000 {
+			reg = <2 0x3ffff000 0 0x1000>;
 			no-map;
 		};
 	};
@@ -179,16 +215,23 @@
 };
 
 /*
- * The PMIC is not supported yet: the node is kept enabled so that it starts
- * probing as soon as the MT6833 pwrap is added to the mainline driver.
+ * PMIC: the MT6359(P) sits behind the MT6833 PMIC wrapper and is described
+ * by mt6359.dtsi. Its interrupt line is wired to GPIO118 on the evergo
+ * (taken from the vendor DT); the wrapper's own interrupt is on SPI 220.
  */
 &pwrap {
 	status = "okay";
 };
 
+&pmic {
+	interrupts-extended = <&pio 118 IRQ_TYPE_LEVEL_HIGH>;
+};
+
 /*
- * SD card slot. 4-bit bus, high-speed only for now (the UHS modes need a
- * 1.8 V vqmmc which requires the PMIC regulators).
+ * SD card slot. 4-bit bus, high-speed only for now: on this board VMMC/VQMMC
+ * are the MT6360's LDO5/LDO3, which mainline has no driver for yet, so they
+ * are modelled as always-on fixed regulators. That also keeps the UHS modes
+ * out of reach, as they need a switchable 1.8 V VQMMC.
  */
 &mmc1 {
 	status = "okay";
@@ -200,9 +243,29 @@
 	no-sdio;
 	no-mmc;
 	/* FIXME: verify the card detect pin on the evergo */
-	cd-gpios = <&pio 4 GPIO_ACTIVE_HIGH>;
+	broken-cd;
 	vmmc-supply = <&mt6359_vmch_fixed_reg>;
 	vqmmc-supply = <&mt6359_vmc_fixed_reg>;
+};
+
+/*
+ * UFS: disabled again.  b73 enabled it (the PMIC wrapper fix in b71/b72 did
+ * make vcc-supply = <&mt6359_vemc_ldo_reg> resolvable in principle), and the
+ * kernel came up far enough to probe the UFS stack -- but it then died before
+ * userspace: CPU1 stopped answering timers, the hard-lockup detector fired
+ * NMI backtraces and RCU reported a stall.  The UFS probe was still returning
+ * -EPROBE_DEFER ("ufshcd_get_vreg: vcc get failed, err=-517") at the time.
+ *
+ * This is the same failure mode b65 hit, so it is the UFS bring-up itself that
+ * has to be understood (clock/power sequencing, or the mt8183 fallback in the
+ * host and PHY drivers not matching mt6833) before it is re-enabled.
+ */
+&ufsphy {
+	status = "okay";
+};
+
+&ufs {
+	status = "disabled";
 };
 
 &pio {
@@ -243,3 +306,8 @@
 &uart0 {
 	status = "okay";
 };
+
+/*
+ * PMIC: reverted for the bring-up bisect. The pwrap/MT6359 nodes (and the
+ * real clock wiring) come back once the kernel boots again.
+ */

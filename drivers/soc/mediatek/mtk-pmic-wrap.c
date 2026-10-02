@@ -84,6 +84,15 @@
 #define PWRAP_CAP_WDT_SRC1	BIT(4)
 #define PWRAP_CAP_ARB		BIT(5)
 #define PWRAP_CAP_ARB_MT8186	BIT(8)
+/*
+ * The bootloader has already brought the wrapper up and the register table we
+ * have for this SoC is an educated guess, so leaving its configuration alone
+ * is safer than running pwrap_init() over it.  Evidence from the evergo
+ * (MT6833): PMIC_WRAP offset 0x0 (MUX_SEL) reads 1 at the moment LK hands over
+ * and 0 by the time userspace runs, i.e. the wrapper is alive on entry and
+ * dead once our init has been through it.
+ */
+#define PWRAP_CAP_TRUST_BL	BIT(9)
 
 /* defines for slave device wrapper registers */
 enum dew_regs {
@@ -769,6 +778,90 @@ static const int mt6873_regs[] = {
 	[PWRAP_WACS2_RDATA] =		0xCA8,
 };
 
+/*
+ * MT6833 / MT6768 family PMIC wrapper.  mt6873_regs above is a different
+ * generation: here the AP WACS2 window lives at 0xC20 (not 0xC80) and the
+ * per-window INIT_DONE flag is bit 21 of that window's own RDATA register,
+ * i.e. PWRAP_STATE_INIT_DONE0 - which is why the driver used to read zero
+ * from 0xCA8 and bail out with -ENODEV.  Offsets are the vendor's
+ * mt6768/pwrap_hal.h.
+ */
+static const int mt6833_regs[] = {
+	[PWRAP_MUX_SEL] =		0x0,
+	[PWRAP_WRAP_EN] =		0x4,
+	[PWRAP_DIO_EN] =		0x8,
+	[PWRAP_SIDLY] =			0xC,	/* SI_SAMPLE_CTRL */
+	[PWRAP_RDDMY] =			0x14,
+	[PWRAP_CSHEXT_WRITE] =		0x18,
+	[PWRAP_CSHEXT_READ] =		0x1C,
+	[PWRAP_CSLEXT_START] =		0x20,	/* CSLEXT_WRITE */
+	[PWRAP_CSLEXT_END] =		0x24,	/* CSLEXT_READ */
+	[PWRAP_STAUPD_PRD] =		0x30,	/* STAUPD_CTRL */
+	[PWRAP_STAUPD_GRPEN] =		0x34,
+	[PWRAP_EINT_STA0_ADR] =		0x38,
+	[PWRAP_EINT_STA1_ADR] =		0x3C,
+	[PWRAP_STAUPD_MAN_TRIG] =	0x4C,
+	[PWRAP_STAUPD_STA] =		0x50,
+	[PWRAP_WRAP_STA] =		0x54,
+	[PWRAP_HARB_INIT] =		0x58,
+	[PWRAP_HARB_HPRIO] =		0x5C,
+	[PWRAP_HIPRIO_ARB_EN] =		0x60,
+	[PWRAP_MAN_EN] =		0x70,
+	[PWRAP_MAN_CMD] =		0x74,
+	[PWRAP_MAN_RDATA] =		0x78,
+	[PWRAP_MAN_VLDCLR] =		0x7C,
+	[PWRAP_WACS0_EN] =		0x80,
+	[PWRAP_WACS1_EN] =		0x88,
+	/*
+	 * No WACS2_EN in this generation, and INIT_DONE sits at 0x0 rather than
+	 * at 0x94.  Reading it gives 1, i.e. the bootloader has already brought
+	 * the wrapper up (its LK boots from the same UFS through it).
+	 */
+	[PWRAP_INIT_DONE2] =		0x0,
+	[PWRAP_INT_EN] =		0xB0,	/* INT0_EN */
+	[PWRAP_SIG_ADR] =		0xD0,
+	[PWRAP_SIG_MODE] =		0xD4,
+	[PWRAP_SIG_VALUE] =		0xD8,
+	[PWRAP_SIG_ERRVAL] =		0xDC,
+	[PWRAP_CRC_EN] =		0xE0,
+	[PWRAP_TIMER_EN] =		0xE4,
+	[PWRAP_TIMER_STA] =		0xE8,
+	[PWRAP_WDT_UNIT] =		0xEC,
+	[PWRAP_WDT_SRC_EN] =		0xF0,
+	[PWRAP_WDT_FLG] =		0xF8,
+	[PWRAP_DEBUG_INT_SEL] =		0x100,
+	[PWRAP_CIPHER_KEY_SEL] =	0x1B8,
+	[PWRAP_CIPHER_IV_SEL] =		0x1BC,
+	[PWRAP_CIPHER_RDY] =		0x1C4,
+	[PWRAP_CIPHER_MODE] =		0x1C8,
+	[PWRAP_CIPHER_SWRST] =		0x1CC,
+	[PWRAP_DCM_EN] =		0x1D0,
+	[PWRAP_DCM_DBC_PRD] =	0x1D8,
+	/*
+	 * The PMIF generation this SoC uses puts the AP's WACS2 window at 0x880,
+	 * not at 0xC20.  The vendor's own table for "mediatek,mt6833-pwrap" - the
+	 * compatible this board's DT uses - says:
+	 *
+	 *   PMIF_SPI_PMIF_SWINF_2_ACC        = 0x880
+	 *   PMIF_SPI_PMIF_SWINF_2_WDATA_31_0 = 0x884
+	 *   PMIF_SPI_PMIF_SWINF_2_RDATA_31_0 = 0x894
+	 *   PMIF_SPI_PMIF_SWINF_2_VLD_CLR    = 0x8A4
+	 *   PMIF_SPI_PMIF_SWINF_2_STA        = 0x8A8  (= WACS2_RDATA)
+	 *   PMIF_SPI_PMIF_INIT_DONE          = 0x0
+	 *
+	 * and drives all of it through that window with the plain register
+	 * address as the command word (its PWRAP_CAP_ARB_V3 branch, our
+	 * PWRAP_CAP_ARB).  Reading and writing 0xC20 instead is what produced the
+	 * whole "every access times out" story: the command never landed
+	 * anywhere, so RDATA stayed 0 and the FSM never reached WFVLDCLR.
+	 */
+	[PWRAP_WACS2_CMD] =		0x880,	/* PMIF_SPI_PMIF_SWINF_2_ACC */
+	[PWRAP_SWINF_2_WDATA_31_0] =	0x884,
+	[PWRAP_SWINF_2_RDATA_31_0] =	0x894,
+	[PWRAP_WACS2_VLDCLR] =		0x8A4,
+	[PWRAP_WACS2_RDATA] =		0x8A8,	/* PMIF_SPI_PMIF_SWINF_2_STA */
+};
+
 static const int mt7622_regs[] = {
 	[PWRAP_MUX_SEL] =		0x0,
 	[PWRAP_WRAP_EN] =		0x4,
@@ -1327,6 +1420,7 @@ enum pwrap_type {
 	PWRAP_MT8195,
 	PWRAP_MT8365,
 	PWRAP_MT8516,
+	PWRAP_MT6833,
 };
 
 struct pmic_wrapper;
@@ -2341,6 +2435,26 @@ static const struct pmic_wrapper_type pwrap_mt6873 = {
 	.init_soc_specific = NULL,
 };
 
+/*
+ * No PWRAP_CAP_ARB on purpose: without it the driver talks to the PMIC over
+ * the WACS2 window and gates itself on PWRAP_STATE_INIT_DONE0, i.e. bit 21 of
+ * WACS2_RDATA - which is exactly the bit this hardware sets.  No reset or
+ * bridge controller either, and no DCM: the bootloader has already brought
+ * the wrapper up, and we do not want the driver reconfiguring the bus.
+ */
+static const struct pmic_wrapper_type pwrap_mt6833 = {
+	.regs = mt6833_regs,
+	.type = PWRAP_MT6833,
+	.arb_en_all = 0x777f,
+	.int_en_all = 0,
+	.int1_en_all = 0,
+	.spi_w = PWRAP_MAN_CMD_SPI_WRITE,
+	.wdt_src = PWRAP_WDT_SRC_MASK_ALL,
+	.caps = PWRAP_CAP_ARB | PWRAP_CAP_TRUST_BL,
+	.init_reg_clock = pwrap_common_init_reg_clock,
+	.init_soc_specific = NULL,
+};
+
 static const struct pmic_wrapper_type pwrap_mt7622 = {
 	.regs = mt7622_regs,
 	.type = PWRAP_MT7622,
@@ -2450,6 +2564,7 @@ static const struct of_device_id of_pwrap_match_tbl[] = {
 	{ .compatible = "mediatek,mt6779-pwrap", .data = &pwrap_mt6779 },
 	{ .compatible = "mediatek,mt6795-pwrap", .data = &pwrap_mt6795 },
 	{ .compatible = "mediatek,mt6797-pwrap", .data = &pwrap_mt6797 },
+	{ .compatible = "mediatek,mt6833-pwrap", .data = &pwrap_mt6833 },
 	{ .compatible = "mediatek,mt6873-pwrap", .data = &pwrap_mt6873 },
 	{ .compatible = "mediatek,mt7622-pwrap", .data = &pwrap_mt7622 },
 	{ .compatible = "mediatek,mt8135-pwrap", .data = &pwrap_mt8135 },
@@ -2472,11 +2587,13 @@ static int pwrap_probe(struct platform_device *pdev)
 	struct device_node *np = pdev->dev.of_node;
 	const struct of_device_id *of_slave_id = NULL;
 
+	dev_info(&pdev->dev, "probing, child=%pOF\n", np->child);
+
 	if (np->child)
 		of_slave_id = of_match_node(of_slave_match_tbl, np->child);
 
 	if (!of_slave_id) {
-		dev_dbg(&pdev->dev, "slave pmic should be defined in dts\n");
+		dev_info(&pdev->dev, "slave pmic should be defined in dts\n");
 		return -EINVAL;
 	}
 
@@ -2498,7 +2615,7 @@ static int pwrap_probe(struct platform_device *pdev)
 		wrp->rstc = devm_reset_control_get(wrp->dev, "pwrap");
 		if (IS_ERR(wrp->rstc)) {
 			ret = PTR_ERR(wrp->rstc);
-			dev_dbg(wrp->dev, "cannot get pwrap reset: %d\n", ret);
+			dev_info(wrp->dev, "cannot get pwrap reset: %d\n", ret);
 			return ret;
 		}
 	}
@@ -2512,8 +2629,8 @@ static int pwrap_probe(struct platform_device *pdev)
 							  "pwrap-bridge");
 		if (IS_ERR(wrp->rstc_bridge)) {
 			ret = PTR_ERR(wrp->rstc_bridge);
-			dev_dbg(wrp->dev,
-				"cannot get pwrap-bridge reset: %d\n", ret);
+			dev_info(wrp->dev,
+				 "cannot get pwrap-bridge reset: %d\n", ret);
 			return ret;
 		}
 	}
@@ -2530,13 +2647,48 @@ static int pwrap_probe(struct platform_device *pdev)
 	}
 
 	/*
+	 * Leave the bootloader's wrapper alone, with one exception: the window
+	 * the AP talks through has to be enabled.
+	 *
+	 * The evergo's LK reads its own boot image through this wrapper and its
+	 * log calls it "wacs1_init_done", i.e. it drives the WACS1 window.  The
+	 * AP side uses WACS2, and if PWRAP_WACS2_EN was never set, every command
+	 * written to WACS2_CMD is ignored: 0xC20/0xC24/0xC28 read back zero, the
+	 * FSM never reaches WFVLDCLR, and the first PMIC access times out with
+	 * -ETIMEDOUT - which is exactly what the MT6359 MFD probe reported
+	 * ("Failed to read chip id: -110").
+	 *
+	 * Also skip the rest of pwrap_init() and the register writes that follow
+	 * it, but *not* the tail of the probe: of_platform_populate() there is
+	 * what creates the PMIC device, and b66 skipped it by returning early,
+	 * which left the wrapper "bound" with no MT6359 and no regulators.
+	 */
+	/*
+	 * Leave the bootloader's wrapper alone.
+	 *
+	 * INIT_DONE reads 1 at handover: the evergo's LK boots from the same UFS
+	 * through this very wrapper, so it is already fully configured.  Skip the
+	 * re-initialisation, but *not* the tail of the probe: the
+	 * of_platform_populate() there is what creates the PMIC device, and b66
+	 * skipped it by returning early, which left the wrapper "bound" with no
+	 * MT6359 and no regulators.
+	 */
+	if (HAS_CAP(wrp->master->caps, PWRAP_CAP_TRUST_BL) &&
+	    pwrap_readl(wrp, PWRAP_INIT_DONE2)) {
+		dev_info(wrp->dev,
+			 "PMIF already initialised by the bootloader (INIT_DONE=%#x), keeping its configuration\n",
+			 pwrap_readl(wrp, PWRAP_INIT_DONE2));
+		goto bl_cfg_kept;
+	}
+
+	/*
 	 * The PMIC could already be initialized by the bootloader.
 	 * Skip initialization here in this case.
 	 */
 	if (!pwrap_readl(wrp, PWRAP_INIT_DONE2)) {
 		ret = pwrap_init(wrp);
 		if (ret) {
-			dev_dbg(wrp->dev, "init failed with %d\n", ret);
+			dev_info(wrp->dev, "init failed with %d\n", ret);
 			return ret;
 		}
 	}
@@ -2549,7 +2701,7 @@ static int pwrap_probe(struct platform_device *pdev)
 		mask_done = PWRAP_STATE_INIT_DONE0;
 
 	if (!(pwrap_readl(wrp, PWRAP_WACS2_RDATA) & mask_done)) {
-		dev_dbg(wrp->dev, "initialization isn't finished\n");
+		dev_info(wrp->dev, "initialization isn't finished\n");
 		return -ENODEV;
 	}
 
@@ -2578,6 +2730,7 @@ static int pwrap_probe(struct platform_device *pdev)
 	if (HAS_CAP(wrp->master->caps, PWRAP_CAP_INT1_EN))
 		pwrap_writel(wrp, wrp->master->int1_en_all, PWRAP_INT1_EN);
 
+bl_cfg_kept:
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
 		return irq;
@@ -2594,8 +2747,8 @@ static int pwrap_probe(struct platform_device *pdev)
 
 	ret = of_platform_populate(np, NULL, NULL, wrp->dev);
 	if (ret) {
-		dev_dbg(wrp->dev, "failed to create child devices at %pOF\n",
-				np);
+		dev_info(wrp->dev, "failed to create child devices at %pOF\n",
+			 np);
 		return ret;
 	}
 

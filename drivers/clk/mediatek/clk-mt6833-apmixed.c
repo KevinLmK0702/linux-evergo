@@ -191,7 +191,34 @@ static int clk_mt6833_apmixed_probe(struct platform_device *pdev)
 mtk_clk_register_plls(&pdev->dev, plls, ARRAY_SIZE(plls),
 			clk_data);
 
-	r = of_clk_add_provider(node, of_clk_src_onecell_get, clk_data);
+	/*
+	 * of_clk_add_hw_provider(), not of_clk_add_provider().
+	 *
+	 * clk_data above comes from mtk_devm_alloc_clk_data(), i.e. it is a
+	 * "struct clk_hw_onecell_data".  The legacy of_clk_add_provider()
+	 * registers of_clk_src_onecell_get(), which casts the same pointer to a
+	 * "struct clk_onecell_data" -- and the two structs put their members in
+	 * the opposite order:
+	 *
+	 *     struct clk_onecell_data    { struct clk **clks; unsigned int clk_num; }
+	 *     struct clk_hw_onecell_data { unsigned int num;   struct clk_hw *hws[]; }
+	 *
+	 * so clk_data->clks[] indexes from offset 0, which is the *num* field.
+	 * Looking up any apmixed clock therefore dereferenced CLK_APMIXED_NR_CLK
+	 * as if it were a pointer:
+	 *
+	 *     pc : of_clk_src_onecell_get+0x14/0x4c
+	 *     x0 : 0x12 (= CLK_APMIXED_NR_CLK)   x2 : 0xe (the index)
+	 *     -> fault at 0x12 + 14 * 8 = 0x82
+	 *     Kernel panic: Attempted to kill init! exitcode=0x0000000b
+	 *
+	 * This was the entire reason "enabling the real USB clocks stops the board
+	 * from booting": mtk_musb asks for CLK_APMIXED_USBPLL (index 14) and the
+	 * lookup crashes the kernel during the initcall.  Every other mt6833 clock
+	 * driver goes through mtk_clk_simple_probe() and is unaffected, which is
+	 * why the infracfg clocks (UFS, pwrap) worked all along.
+	 */
+	r = of_clk_add_hw_provider(node, of_clk_hw_onecell_get, clk_data);
 
 	if (r)
 		pr_notice("%s(): could not register clock provider: %d\n",

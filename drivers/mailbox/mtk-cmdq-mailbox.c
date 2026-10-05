@@ -851,6 +851,14 @@ static const struct of_device_id cmdq_of_ids[] = {
 	{.compatible = "mediatek,mt6779-gce", .data = (void *)&gce_plat_mt6779},
 	{.compatible = "mediatek,mt8173-gce", .data = (void *)&gce_plat_mt8173},
 	{.compatible = "mediatek,mt8183-gce", .data = (void *)&gce_plat_mt8183},
+	/*
+	 * mt6833's GCE is an mt8183 clone: same base (0x10228000, 0x4000), same
+	 * SPI 203, same #mbox-cells = <3>.  The vendor DT names it
+	 * "mediatek,mt6833-gce" and drives it with mt8183-style data, so the
+	 * display routing (which the mmsys driver programs through the GCE)
+	 * can use the mt8183 plat as-is.
+	 */
+	{.compatible = "mediatek,mt6833-gce", .data = (void *)&gce_plat_mt8183},
 	{.compatible = "mediatek,mt8186-gce", .data = (void *)&gce_plat_mt8186},
 	{.compatible = "mediatek,mt8188-gce", .data = (void *)&gce_plat_mt8188},
 	{.compatible = "mediatek,mt8192-gce", .data = (void *)&gce_plat_mt8192},

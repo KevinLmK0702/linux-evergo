@@ -9,6 +9,12 @@
 #include <dt-bindings/phy/phy.h>
 #include <dt-bindings/thermal/thermal.h>
 #include <dt-bindings/clock/mediatek,mt6833-clk.h>
+/*
+ * The mt6833 GCE is an mt8183 clone (same base 0x10228000, same SPI 203,
+ * same #mbox-cells = <3>), so its subsys ids and thread priorities carry
+ * over verbatim; there is no upstream mt6833 gce header yet.
+ */
+#include <dt-bindings/gce/mt8183-gce.h>
 
 /* #include <dt-bindings/gce/mediatek,mt6833-gce.h>
  * #include <dt-bindings/memory/mt6833-larb-port.h
@@ -399,21 +405,47 @@
 			interrupts = <GIC_SPI 96 IRQ_TYPE_LEVEL_HIGH>;
 			interrupt-names = "mc";
 			/*
-			 * clk26m placeholders on purpose.  The real clocks
-			 * (CLK_IFRAO_SSUSB, CLK_APMIXED_USBPLL,
-			 * CLK_TOP_UNIVPLL_D5_D4) are the right ones on paper and
-			 * the 48 MHz SIE clock is a hard requirement, but enabling
-			 * them is not harmless here: the board boots with the
-			 * placeholders and does not with the real ones, so they
-			 * stay commented out until whatever that breaks is found.
+			 * The real clocks, now that the reason they crashed is
+			 * fixed.
+			 *
+			 * b101 enabled these and the board panicked in the mtk_musb
+			 * initcall, which is what the old "the board does not boot
+			 * with the real ones" note was about.  The cause turned out
+			 * to be in clk-mt6833-apmixed.c, not here: it registered its
+			 * provider with the legacy of_clk_add_provider() +
+			 * of_clk_src_onecell_get() while handing over a
+			 * clk_hw_onecell_data, and the two structs put their
+			 * members in the opposite order -- so any apmixed clock
+			 * lookup indexed from the num field and faulted.  Fixed in
+			 * that driver (b103), so CLK_APMIXED_USBPLL, which MUSB asks
+			 * for, now resolves.
+			 *
+			 * The 48 MHz SIE clock is a hard requirement for MUSB: with
+			 * 26 MHz fed to "main" the controller's registers sit in a
+			 * clock domain that is not running, and binding a gadget to
+			 * the UDC wedges the bus (b100).
 			 */
-			clocks = <&clk26m>, <&clk26m>, <&clk26m>;
-			     //    <&infracfg_ao CLK_IFRAO_SSUSB>,
-			     //    <&apmixedsys CLK_APMIXED_USBPLL>,
-			     //    <&topckgen CLK_TOP_UNIVPLL_D5_D4>;
+			clocks = <&infracfg_ao CLK_IFRAO_SSUSB>,
+				 <&apmixedsys CLK_APMIXED_USBPLL>,
+				 <&topckgen CLK_TOP_UNIVPLL_D5_D4>;
 			clock-names = "main",
 				      "mcu",
 				      "univpll";
+			/*
+			 * otg, not peripheral.
+			 *
+			 * Only MUSB_OTG makes mtk_musb_probe()'s musb->port_mode come out
+			 * as MUSB_OTG, and only then does mtk_otg_switch_init() run and
+			 * register the usb_role_switch.	 That matters because
+			 * phy_power_on(glue->phy) is called from inside that switch's
+			 * callback and from nowhere else: as a plain peripheral the PHY
+			 * stayed off, DEVCTL never reported VBUS, and the host saw no
+			 * device at all (b103).
+			 *
+			 * CONFIG_USB_MUSB_DUAL_ROLE (not _GADGET) is what lets this
+			 * property be read instead of being overridden.
+			 */
+			dr_mode = "otg";
 			phys = <&u2port0 PHY_TYPE_USB2>;
 		};
 
@@ -497,6 +529,26 @@
 		};
 
 		/*
+		 * The LCD bias + backlight chip (LM36273) sits on this bus, so it is
+		 * the one i2c controller this SoC has that is described in mainline.
+		 * Layout and clock ids are from the vendor DT (registers at
+		 * 0x11f00000, clock gate inside the I-N wrap, SPI 118 level high).
+		 */
+		i2c6: i2c@11f00000 {
+			compatible = "mediatek,mt6833-i2c", "mediatek,mt8183-i2c";
+			reg = <0 0x11f00000 0 0x1000>,
+			      <0 0x10217580 0 0x80>;
+			interrupts = <GIC_SPI 118 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&imp_iic_wrap_n CLK_IMPN_AP_CLOCK_RO_I2C6>,
+				 <&infracfg_ao CLK_IFRAO_AP_DMA>;
+			clock-names = "main", "dma";
+			clock-div = <5>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		/*
 		gpu: gpu@13000000 {
 			compatible = "mediatek,mt6833-mali", "arm,mali-valhall-jm";
 			reg = <0 0x13000000 0 0x4000>;
@@ -526,10 +578,162 @@
 			#clock-cells = <1>;
 		};
 
+		/*
+		 * GCE: the mmsys driver programs the display routing through it, and
+		 * mtk-drm uses it for command submission.  Same block as mt8183
+		 * (0x10228000 + 0x4000, SPI 203), per the vendor DT.
+		 */
+		gce: mailbox@10228000 {
+			compatible = "mediatek,mt6833-gce";
+			reg = <0 0x10228000 0 0x4000>;
+			interrupts = <GIC_SPI 203 IRQ_TYPE_LEVEL_LOW>;
+			#mbox-cells = <3>;
+			#gce-event-cells = <1>;
+			#gce-subsys-cells = <2>;
+			clocks = <&infracfg_ao CLK_IFRAO_GCE>;
+			clock-names = "gce";
+		};
+
 		mmsys: syscon@14000000 {
 			compatible = "mediatek,mt6833-mmsys", "syscon";
 			reg = <0 0x14000000 0 0x1000>;
 			#clock-cells = <1>;
+			mboxes = <&gce 0 CMDQ_THR_PRIO_HIGHEST>,
+				 <&gce 1 CMDQ_THR_PRIO_HIGHEST>;
+			mediatek,gce-client-reg = <&gce SUBSYS_1400XXXX 0 0x1000>;
+
+			port {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				mmsys_ep_main: endpoint@0 {
+					reg = <0>;
+					remote-endpoint = <&ovl0_in>;
+				};
+			};
+		};
+
+		/*
+		 * The display pipeline is OVL0 -> RDMA0 -> DSI0: the bypass-PQ
+		 * path, which is also the scoring path the vendor's
+		 * DDP_SCENARIO_PRIMARY_BYPASS_PQ / _RDMA0_DISP scenarios use.
+		 * The drivers walk these port graphs to build the DDP path.
+		 */
+		disp_mutex0: mutex@14001000 {
+			compatible = "mediatek,mt6833-disp-mutex";
+			reg = <0 0x14001000 0 0x1000>;
+			mediatek,gce-client-reg = <&gce SUBSYS_1400XXXX 0x1000 0x1000>;
+			mediatek,gce-events = <CMDQ_EVENT_MUTEX_STREAM_DONE0>;
+			interrupts = <GIC_SPI 253 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&mmsys CLK_MM_DISP_MUTEX0>;
+			status = "disabled";
+		};
+
+		disp_ovl0: ovl@14005000 {
+			compatible = "mediatek,mt6833-disp-ovl";
+			reg = <0 0x14005000 0 0x1000>;
+			mediatek,gce-client-reg = <&gce SUBSYS_1400XXXX 0x5000 0x1000>;
+			interrupts = <GIC_SPI 255 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&mmsys CLK_MM_DISP_OVL0>;
+			status = "disabled";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					ovl0_in: endpoint {
+						remote-endpoint = <&mmsys_ep_main>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+					ovl0_out: endpoint {
+						remote-endpoint = <&rdma0_in>;
+					};
+				};
+			};
+		};
+
+		disp_rdma0: rdma@14007000 {
+			compatible = "mediatek,mt6833-disp-rdma";
+			reg = <0 0x14007000 0 0x1000>;
+			mediatek,gce-client-reg = <&gce SUBSYS_1400XXXX 0x7000 0x1000>;
+			interrupts = <GIC_SPI 257 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&mmsys CLK_MM_DISP_RDMA0>;
+			/* the vendor's video-mode FIFO size for this SoC */
+			mediatek,rdma-fifo-size = <2240>;
+			status = "disabled";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					rdma0_in: endpoint {
+						remote-endpoint = <&ovl0_out>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+					rdma0_out: endpoint {
+						remote-endpoint = <&dsi_in>;
+					};
+				};
+			};
+		};
+
+		/*
+		 * C-PHY: the evergo panels are driven as three trios with no clock
+		 * lane, which is why the PHY uses the mt6833-mipi-tx-cphy driver
+		 * and not the D-PHY data of the same register file.
+		 */
+		mipi_tx0: dsi-phy@11e50000 {
+			compatible = "mediatek,mt6833-mipi-tx-cphy";
+			reg = <0 0x11e50000 0 0x1000>;
+			clocks = <&clk26m>;
+			clock-output-names = "mipi_tx0_pll";
+			#clock-cells = <0>;
+			#phy-cells = <0>;
+			status = "disabled";
+		};
+
+		dsi0: dsi@14013000 {
+			compatible = "mediatek,mt6833-dsi";
+			reg = <0 0x14013000 0 0x1000>;
+			mediatek,gce-client-reg = <&gce SUBSYS_1401XXXX 0x3000 0x1000>;
+			interrupts = <GIC_SPI 269 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&mmsys CLK_MM_DSI0>,
+				 <&mmsys CLK_MM_DSI0_DSI_CK_DOMAIN>,
+				 <&mipi_tx0>;
+			clock-names = "engine", "digital", "hs";
+			phys = <&mipi_tx0>;
+			phy-names = "dphy";
+			status = "disabled";
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					dsi_in: endpoint {
+						remote-endpoint = <&rdma0_out>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+					dsi_out: endpoint { };
+				};
+			};
 		};
 
 		imgsys1: clock-controller@15020000 {
@@ -630,10 +834,43 @@
 				<0 0>;
 
 			/*
+			 * This controller is the pre-MCQ "legacy IP" (the driver logs
+			 * "legacy IP version - 0x20160706, is legacy : 1"), so it has one
+			 * doorbell and no multi-circular-queue.  Without this flag
+			 * ufs_mtk_init_host_caps() leaves host->caps at 0x0, which means
+			 * UFS_MTK_CAP_DISABLE_MCQ is clear, which means
+			 * UFSHCD_QUIRK_BROKEN_LSDBS_CAP is never set -- and the core then
+			 * trusts the LSDBS_SUPPORT bit it reads out of the CAPABILITIES
+			 * register, concludes that legacy single doorbell has been removed,
+			 * and aborts probe with -EINVAL:
+			 *
+			 *   ufshcd_add_scsi_host: failed to initialize
+			 *          (legacy doorbell mode not supported)
+			 *
+			 * The quirk exists precisely because that register field is not
+			 * meaningful on older IP, so it makes the core assume legacy
+			 * doorbell is available instead.  It also stops the driver from
+			 * asking for queue IRQs that this board does not route
+			 * ("error -ENXIO: IRQ index 1 not found").  mt8195.dtsi sets the
+			 * same property.
+			 */
+			mediatek,ufs-disable-mcq;
+
+			/*
 			 * MT6833 keeps only VCC under software control (the MT6359's
 			 * VEMC rail); VCCQ/VCCQ2 are fed by an always-on external LDO.
+			 *
+			 * The node to point at is ldo_vemc_1, not ldo_vemc: the evergo
+			 * PMIC is an MT6359P (chip code 0x5920), and mt6359-regulator.c
+			 * picks its descriptor table by reading MT6359P_HWCID rather than
+			 * by compatible.  The MT6359P table registers VEMC under the name
+			 * "ldo_vemc_1"; the plain-MT6359 table's "ldo_vemc" is the one
+			 * mt6359.dtsi defines but nothing ever binds it.  Pointing vcc at
+			 * that orphan made devm_regulator_get("vcc") return -EPROBE_DEFER
+			 * forever -- the regulator node exists, so the core defers instead
+			 * of falling back, and UFS could never probe.
 			 */
-			vcc-supply = <&mt6359_vemc_ldo_reg>;
+			vcc-supply = <&mt6359_vemc_1_ldo_reg>;
 			status = "disabled";
 		};
 

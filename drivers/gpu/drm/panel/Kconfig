@@ -444,6 +444,16 @@ config DRM_PANEL_JDI_R63452
 	  Say Y here if you want to enable support for the JDI R63452
 	  DSI command mode panel as found in Xiaomi Mi 5 Devices.
 
+config DRM_PANEL_K16A_VDO
+	tristate "K16A (NT36672C) 1080x2400 C-PHY video mode panels"
+	depends on OF
+	depends on DRM_MIPI_DSI
+	depends on BACKLIGHT_CLASS_DEVICE
+	help
+	  Say Y here if you want to enable support for the Tianma and CSOT
+	  "K16A" 1080x2400 panels (Novatek NT36672C, driven as 3-trio C-PHY)
+	  used on the Xiaomi Redmi Note 11 5G (evergo).
+
 config DRM_PANEL_KHADAS_TS050
 	tristate "Khadas TS050 panel"
 	depends on OF

@@ -249,23 +249,31 @@
 };
 
 /*
- * UFS: disabled again.  b73 enabled it (the PMIC wrapper fix in b71/b72 did
- * make vcc-supply = <&mt6359_vemc_ldo_reg> resolvable in principle), and the
- * kernel came up far enough to probe the UFS stack -- but it then died before
- * userspace: CPU1 stopped answering timers, the hard-lockup detector fired
- * NMI backtraces and RCU reported a stall.  The UFS probe was still returning
- * -EPROBE_DEFER ("ufshcd_get_vreg: vcc get failed, err=-517") at the time.
+ * UFS: enabled on purpose - this is step one of the bring-up, now that the
+ * rest of the port is stable enough to survive a failure and tell us about it.
  *
- * This is the same failure mode b65 hit, so it is the UFS bring-up itself that
- * has to be understood (clock/power sequencing, or the mt8183 fallback in the
- * host and PHY drivers not matching mt6833) before it is re-enabled.
+ * Two things have changed since b73 was killed by this:
+ *
+ *  - LK's own log shows it brings the link up on this board already:
+ *    "[UFS] ufs id: H9HQ21AFAMADAR", "RX HS-G3, setting is 3",
+ *    "TX HS-G3, setting is 3", "HS-G3-2, 1 lane".  So the rails, the hardware
+ *    and the vendor's timing sequence are known good.  What is new here is
+ *    the mainline ufs-mediatek driver, which matches this controller only
+ *    through its mt8183 fallback (the driver's table has mt8183 and mt8195 but
+ *    no mt6833) and therefore runs mt8183 register paths on an mt6833.
+ *  - The tick-2 SIGBUS that used to kill init is fixed, so a hang here no
+ *    longer hides behind it, and the log survives far enough to name the step
+ *    that broke.
+ *
+ * If the probe hangs, the ring frames LK flushes on the next boot will show
+ * the last thing the driver did.  That is the point of this build.
  */
 &ufsphy {
 	status = "okay";
 };
 
 &ufs {
-	status = "disabled";
+	status = "okay";
 };
 
 &pio {
@@ -291,8 +299,36 @@
 
 &usb2 {
 	status = "okay";
-	dr_mode = "peripheral";
-	maximum-speed = "high-speed";
+	/*
+	 * otg, matching the SoC dtsi -- this line used to say "peripheral" and
+	 * that silently overrode it, because this file is included after
+	 * mt6833.dtsi and the later property wins.
+	 *
+	 * The consequence was not obvious: with dr_mode = peripheral the mediatek
+	 * musb glue comes up as MUSB_PERIPHERAL, mtk_musb_init() therefore skips
+	 * mtk_otg_switch_init(), and no usb_role_switch is registered at all --
+	 * /sys/class/usb_role stays empty, so there is no way to drive the role
+	 * (and hence the PHY's power-on path through the role callback) from
+	 * userspace.
+	 */
+	/*
+	 * full-speed, not high-speed.
+	 *
+	 * The glue now passes this on to musb as config->maximum_speed, which is
+	 * what decides whether musb_start() enables high speed at all.  With high
+	 * speed enabled the controller latched POWER.HSMODE (a leftover from the
+	 * bootloader's own high-speed download mode) and musb told the gadget
+	 * layer it was on a 480 Mbps link - so the gadget advertised 512-byte
+	 * bulk endpoints on a link that had negotiated 12 Mbps, and Windows
+	 * refused to start the device.  The high-speed attach on this board also
+	 * looks marginal: BABBLE interrupts were showing up during enumeration,
+	 * which is data-line trouble, and matches the descriptor exchange
+	 * working one attempt and failing the next.
+	 *
+	 * A CDC-ACM console at 115200 baud does not need more than 12 Mbps.
+	 */
+	dr_mode = "otg";
+	maximum-speed = "full-speed";
 };
 
 &u2phy {
@@ -311,3 +347,92 @@
  * PMIC: reverted for the bring-up bisect. The pwrap/MT6359 nodes (and the
  * real clock wiring) come back once the kernel boots again.
  */
+
+/*
+ * Display: the K16A panel is driven as 3-trio C-PHY (no clock lane), so the
+ * DSI node selects C-PHY mode and hands over the panel module's own LP/HS
+ * cycle counts (11/35/26) for the C-PHY blanking maths.  The bias and
+ * backlight chip (LM36273) lives on i2c6.
+ */
+&i2c6 {
+	status = "okay";
+	clock-frequency = <400000>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c6_pins>;
+
+	lm36273: backlight@11 {
+		compatible = "mediatek,i2c_lcd_bias";
+		reg = <0x11>;
+	};
+};
+
+&pio {
+	i2c6_pins: i2c6-pins {
+		pins-scl {
+			pinmux = <PINMUX_GPIO109__FUNC_SCL6>;
+			bias-disable;
+		};
+
+		pins-sda {
+			pinmux = <PINMUX_GPIO110__FUNC_SDA6>;
+			bias-disable;
+		};
+	};
+};
+
+&disp_mutex0 {
+	status = "okay";
+};
+
+&disp_ovl0 {
+	status = "okay";
+};
+
+&disp_rdma0 {
+	status = "okay";
+};
+
+&mipi_tx0 {
+	status = "okay";
+};
+
+&dsi0 {
+	status = "okay";
+
+	mediatek,cphy;
+	mediatek,hs-prpr = <11>;
+	mediatek,hs-zero = <35>;
+	mediatek,hs-trail = <26>;
+
+	/*
+	 * This unit carries the CSOT module - LK reports "we will use lcm:
+	 * k16a_42_02_0b_vdo".  A Tianma unit uses the same node with
+	 * compatible = "k16a_36_02_0a_vdo,lcm" instead.
+	 *
+	 * lcd_dvdd (MT6359 VCN13) is left out on purpose: the driver treats it
+	 * as optional so the panel can come up while the PMIC side is still in
+	 * progress.
+	 */
+	panel@0 {
+		compatible = "k16a_42_02_0b_vdo,lcm";
+		reg = <0>;
+
+		backlight = <&lm36273>;
+
+		pm-enable-gpios = <&pio 136 GPIO_ACTIVE_HIGH>;
+		lcm-bl-enable-gpios = <&pio 87 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&pio 86 GPIO_ACTIVE_HIGH>;
+		bias-gpios = <&pio 137 GPIO_ACTIVE_HIGH>,
+			     <&pio 138 GPIO_ACTIVE_HIGH>;
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&dsi_out>;
+			};
+		};
+	};
+};
+
+&dsi_out {
+	remote-endpoint = <&panel_in>;
+};

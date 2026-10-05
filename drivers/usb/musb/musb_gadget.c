@@ -1776,8 +1776,38 @@ int musb_gadget_setup(struct musb *musb)
 	 */
 
 	musb->g.ops = &musb_gadget_operations;
-	musb->g.max_speed = USB_SPEED_HIGH;
+	/*
+	 * Honour the platform's maximum_speed instead of hardcoding high speed.
+	 *
+	 * musb is a high-speed capable controller, but "capable" is not the same
+	 * as "this board is wired and clocked for it".  Leaving this at
+	 * USB_SPEED_HIGH made gadget_is_dualspeed() true on every musb board, and
+	 * when the link is really full speed that has two visible consequences:
+	 *
+	 *  - composite.c answers GET_DESCRIPTOR(DEVICE_QUALIFIER), telling the
+	 *    host the device can also run at high speed.  On the evergo board the
+	 *    PHY is forced to full speed, so Windows takes that offer, resets the
+	 *    port to run the high-speed handshake, finds a device that stays at
+	 *    12 Mbps, and retries -- on a ~200 ms cycle, indefinitely.  It never
+	 *    reaches the point of reading a sector, so the volume appears with no
+	 *    capacity, and every round re-arms the mass-storage unit attention
+	 *    (SK 6, ASC 0x29 "power on / reset occurred") that the logs show.
+	 *  - the controller and the gadget disagreed about the link: only the
+	 *    platform config knew about full speed.
+	 *
+	 * Boards that really do run high speed are unaffected -- their DT says
+	 * high-speed, or says nothing and keeps the old fallback below.
+	 */
+	if (musb->config && musb->config->maximum_speed == USB_SPEED_FULL)
+		musb->g.max_speed = USB_SPEED_FULL;
+	else
+		musb->g.max_speed = USB_SPEED_HIGH;
 	musb->g.speed = USB_SPEED_UNKNOWN;
+	dev_info(musb->controller,
+		 "gadget max_speed %s (platform maximum_speed %s)\n",
+		 usb_speed_string(musb->g.max_speed),
+		 musb->config ? usb_speed_string(musb->config->maximum_speed)
+			      : "none");
 
 	MUSB_DEV_MODE(musb);
 	musb_set_state(musb, OTG_STATE_B_IDLE);
@@ -2053,9 +2083,32 @@ __acquires(musb->lock)
 		musb_writeb(mbase, MUSB_DEVCTL, MUSB_DEVCTL_SESSION);
 
 
-	/* what speed did we negotiate? */
+	/*
+	 * What speed did we negotiate?
+	 *
+	 * HSMODE is a status bit the controller raises once it is running at
+	 * high speed, but it must not be trusted on its own.  On MT6833 it reads
+	 * back set from before the first bus reset -- the bootloader runs its
+	 * download mode at high speed and musb never clears the bit -- so musb
+	 * latched USB_SPEED_HIGH here on a link that actually negotiated full
+	 * speed.  The gadget layer picks its whole descriptor set from this:
+	 * f_acm then advertised 512-byte bulk endpoints on a 12 Mbps link, which
+	 * is not a legal full-speed configuration, and Windows refused to start
+	 * the device -- a node in Device Manager with a warning triangle, an
+	 * empty [System.IO.Ports.SerialPort]::GetPortNames() and a port that is
+	 * never opened.
+	 *
+	 * It also made enumeration flaky rather than broken: whether the stale
+	 * bit had been cleared by the hardware yet when the reset interrupt ran
+	 * decided whether the descriptors came out right, which is why one build
+	 * got a COM port and the next did not with identical descriptors.
+	 *
+	 * HSENAB is what we set to ask for high speed, so if it is clear the
+	 * controller cannot have negotiated it and HSMODE has to be stale.
+	 */
 	power = musb_readb(mbase, MUSB_POWER);
-	musb->g.speed = (power & MUSB_POWER_HSMODE)
+	musb->g.speed =
+		((power & MUSB_POWER_HSENAB) && (power & MUSB_POWER_HSMODE))
 			? USB_SPEED_HIGH : USB_SPEED_FULL;
 
 	/* start in USB_STATE_DEFAULT */

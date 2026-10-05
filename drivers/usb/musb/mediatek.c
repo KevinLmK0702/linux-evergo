@@ -13,6 +13,7 @@
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/usb/of.h>
 #include <linux/usb/role.h>
 #include <linux/usb/usb_phy_generic.h>
 #include "musb_core.h"
@@ -424,7 +425,44 @@ static int mtk_musb_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	pdata->config = &mtk_musb_hdrc_config;
+	/*
+	 * Honour the DT's maximum-speed.
+	 *
+	 * musb_start() does
+	 *
+	 *     power = MUSB_POWER_ISOUPDATE;
+	 *     if (config->maximum_speed == USB_SPEED_HIGH ||
+	 *         config->maximum_speed == USB_SPEED_UNKNOWN)
+	 *             power |= MUSB_POWER_HSENAB;
+	 *
+	 * so with maximum_speed left at its default of 0 (= UNKNOWN) the glue
+	 * silently re-enabled high speed on every start, whatever the device tree
+	 * said.  On MT6833 that kept HSMODE set as well, musb_g_reset() then
+	 * latched USB_SPEED_HIGH, and the gadget handed out the high-speed
+	 * descriptor set - 512-byte bulk endpoints - to a link that was actually
+	 * full speed.  Windows will not start a device configured like that, and
+	 * on top of it the high-speed link on this board is marginal (BABBLE
+	 * interrupts were showing up), which is why the descriptor exchange
+	 * sometimes failed outright.
+	 *
+	 * The shared mtk_musb_hdrc_config is 'static const' and is also used by
+	 * MT2701/MT7623/MT8516, so copy it instead of relaxing that.
+	 */
+	{
+		struct musb_hdrc_config *cfg;
+
+		cfg = devm_kmemdup(dev, &mtk_musb_hdrc_config, sizeof(*cfg),
+				   GFP_KERNEL);
+		if (!cfg)
+			return -ENOMEM;
+		cfg->maximum_speed = usb_get_maximum_speed(dev);
+		if (cfg->maximum_speed == USB_SPEED_UNKNOWN)
+			cfg->maximum_speed = USB_SPEED_HIGH;
+		/* 0=UNKNOWN 1=LOW 2=FULL 3=HIGH 4=WIRELESS 5=SUPER */
+		dev_info(dev, "musb maximum_speed from DT: %d\n",
+			 cfg->maximum_speed);
+		pdata->config = cfg;
+	}
 	pdata->platform_ops = &mtk_musb_ops;
 	pdata->mode = usb_get_dr_mode(dev);
 

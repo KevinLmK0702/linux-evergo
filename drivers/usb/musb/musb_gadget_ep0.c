@@ -790,8 +790,13 @@ setup:
 						"irq lost!\n",
 						musb_driver_name);
 				power = musb_readb(mbase, MUSB_POWER);
-				musb->g.speed = (power & MUSB_POWER_HSMODE)
-					? USB_SPEED_HIGH : USB_SPEED_FULL;
+				/* Same trap as in musb_g_reset(): a stale HSMODE
+				 * with HSENAB clear means full speed, not high.
+				 */
+				musb->g.speed =
+					((power & MUSB_POWER_HSENAB) &&
+					 (power & MUSB_POWER_HSMODE))
+						? USB_SPEED_HIGH : USB_SPEED_FULL;
 
 			}
 

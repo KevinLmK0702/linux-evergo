@@ -878,6 +878,32 @@ static void u2_phy_instance_power_on(struct mtk_tphy *tphy,
 
 	mtk_phy_clear_bits(com + U3P_U2PHYDTM1, P2C_RG_SESSEND);
 
+	/*
+	 * ... but setting the state bits alone is a no-op: U2PHYDTM1[13:8] are
+	 * their force enables, and the controller ignores VBUSVALID/AVALID/
+	 * BVALID/SESSEND/IDDIG/IDPULLUP unless the matching force bit is set
+	 * too.  Without them the PHY never asserted IDPULLUP - the D+ 1.5k
+	 * pull-up - so there was simply nothing on the bus for a host to
+	 * enumerate, no matter what MUSB's POWER.SOFTCONN said.  Every USB log
+	 * channel on this board was dead for exactly this reason; the vendor
+	 * sequence (old-log-channels/init_main.c, and drivers/misc/mediatek/
+	 * usb20/mt6833/usb20_phy.c before it) drives the whole set by hand:
+	 * state = VBUSVALID|BVALID|AVALID|IDDIG|IDPULLUP, SESSEND = 0, plus all
+	 * six force enables, i.e. 0x2f | 0x3f00 with SESSEND cleared.
+	 *
+	 * This has to happen at power-on, i.e. before the gadget driver binds:
+	 * MUSB latches its session state once, so poking the PHY later from
+	 * userspace leaves the UDC at "not attached" forever.
+	 */
+	{
+		u32 dtm1 = readl(com + U3P_U2PHYDTM1);
+
+		dtm1 &= ~BIT(4);		/* SESSEND = 0 */
+		dtm1 |= 0x2f;			/* VBUSVALID|BVALID|AVALID|IDDIG|IDPULLUP */
+		dtm1 |= 0x3f << 8;		/* and all six force enables */
+		writel(dtm1, com + U3P_U2PHYDTM1);
+	}
+
 	if (tphy->pdata->avoid_rx_sen_degradation && index) {
 		mtk_phy_set_bits(com + U3D_U2PHYDCR0, P2C_RG_SIF_U2PLL_FORCE_ON);
 

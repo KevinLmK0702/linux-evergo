@@ -171,6 +171,12 @@ static const unsigned int mt8186_mtk_ddp_main[] = {
 	DDP_COMPONENT_DSI0,
 };
 
+static const unsigned int mt6833_mtk_ddp_main[] = {
+	DDP_COMPONENT_OVL0,
+	DDP_COMPONENT_RDMA0,
+	DDP_COMPONENT_DSI0,
+};
+
 static const unsigned int mt8186_mtk_ddp_ext[] = {
 	DDP_COMPONENT_OVL_2L0,
 	DDP_COMPONENT_RDMA1,
@@ -289,6 +295,27 @@ static const struct mtk_mmsys_driver_data mt8186_mmsys_driver_data = {
 	.mmsys_dev_num = 1,
 };
 
+/*
+ * The CSOT/Tianma module hangs off DSI0, and DSI0 is the only connector this
+ * board has.  Without an entry here the routing loop in this file is skipped
+ * entirely (num_conn_routes == 0), so mtk_crtc_create() never associates the
+ * panel connector with a CRTC; drm_client_setup() -> the fbdev helper then
+ * bails out with "[drm] Cannot find any crtc or sizes", there is no fbdev, and
+ * therefore no fbcon either -- a completely dark panel even though the DSI
+ * host, the panel and the LM36273 backlight all probe fine.
+ */
+static const struct mtk_drm_route mt6833_mtk_ddp_main_routes[] = {
+	{0, DDP_COMPONENT_DSI0},
+};
+
+static const struct mtk_mmsys_driver_data mt6833_mmsys_driver_data = {
+	.conn_routes = mt6833_mtk_ddp_main_routes,
+	.num_conn_routes = ARRAY_SIZE(mt6833_mtk_ddp_main_routes),
+.main_path = mt6833_mtk_ddp_main,
+	.main_len = ARRAY_SIZE(mt6833_mtk_ddp_main),
+	.mmsys_dev_num = 1,
+};
+
 static const struct mtk_mmsys_driver_data mt8188_vdosys0_driver_data = {
 	.main_path = mt8188_mtk_ddp_main,
 	.main_len = ARRAY_SIZE(mt8188_mtk_ddp_main),
@@ -342,6 +369,8 @@ static const struct of_device_id mtk_drm_of_ids[] = {
 	  .data = &mt8167_mmsys_driver_data},
 	{ .compatible = "mediatek,mt8173-mmsys",
 	  .data = &mt8173_mmsys_driver_data},
+	{ .compatible = "mediatek,mt6833-mmsys",
+	  .data = &mt6833_mmsys_driver_data},
 	{ .compatible = "mediatek,mt8183-mmsys",
 	  .data = &mt8183_mmsys_driver_data},
 	{ .compatible = "mediatek,mt8186-mmsys",
@@ -742,6 +771,8 @@ static const struct of_device_id mtk_ddp_comp_dt_ids[] = {
 	  .data = (void *)MTK_DISP_MUTEX },
 	{ .compatible = "mediatek,mt2712-disp-mutex",
 	  .data = (void *)MTK_DISP_MUTEX },
+	{ .compatible = "mediatek,mt6833-disp-mutex",
+	  .data = (void *)MTK_DISP_MUTEX },
 	{ .compatible = "mediatek,mt8167-disp-mutex",
 	  .data = (void *)MTK_DISP_MUTEX },
 	{ .compatible = "mediatek,mt8173-disp-mutex",
@@ -768,6 +799,8 @@ static const struct of_device_id mtk_ddp_comp_dt_ids[] = {
 	  .data = (void *)MTK_DISP_OVL },
 	{ .compatible = "mediatek,mt8183-disp-ovl",
 	  .data = (void *)MTK_DISP_OVL },
+	{ .compatible = "mediatek,mt6833-disp-ovl",
+	  .data = (void *)MTK_DISP_OVL },
 	{ .compatible = "mediatek,mt8192-disp-ovl",
 	  .data = (void *)MTK_DISP_OVL },
 	{ .compatible = "mediatek,mt8195-disp-ovl",
@@ -791,6 +824,8 @@ static const struct of_device_id mtk_ddp_comp_dt_ids[] = {
 	{ .compatible = "mediatek,mt8173-disp-rdma",
 	  .data = (void *)MTK_DISP_RDMA },
 	{ .compatible = "mediatek,mt8183-disp-rdma",
+	  .data = (void *)MTK_DISP_RDMA },
+	{ .compatible = "mediatek,mt6833-disp-rdma",
 	  .data = (void *)MTK_DISP_RDMA },
 	{ .compatible = "mediatek,mt8195-disp-rdma",
 	  .data = (void *)MTK_DISP_RDMA },
@@ -817,6 +852,8 @@ static const struct of_device_id mtk_ddp_comp_dt_ids[] = {
 	{ .compatible = "mediatek,mt8195-dpi",
 	  .data = (void *)MTK_DPI },
 	{ .compatible = "mediatek,mt2701-dsi",
+	  .data = (void *)MTK_DSI },
+	{ .compatible = "mediatek,mt6833-dsi",
 	  .data = (void *)MTK_DSI },
 	{ .compatible = "mediatek,mt8173-dsi",
 	  .data = (void *)MTK_DSI },

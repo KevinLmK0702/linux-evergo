@@ -177,7 +177,7 @@ static struct usb_endpoint_descriptor acm_fs_out_desc = {
 };
 
 static struct usb_descriptor_header *acm_fs_function[] = {
-	(struct usb_descriptor_header *) &acm_iad_descriptor,
+	/* IAD removed (b139): device-level CDC class 0x02 does the job; Windows does not use IADs for class 02 (see MS IAD doc). The comm/data pairing comes from the CDC Union descriptor below, exactly as on real CDC devices. */
 	(struct usb_descriptor_header *) &acm_control_interface_desc,
 	(struct usb_descriptor_header *) &acm_header_desc,
 	(struct usb_descriptor_header *) &acm_call_mgmt_descriptor,
@@ -215,7 +215,7 @@ static struct usb_endpoint_descriptor acm_hs_out_desc = {
 };
 
 static struct usb_descriptor_header *acm_hs_function[] = {
-	(struct usb_descriptor_header *) &acm_iad_descriptor,
+	/* IAD removed (b139): device-level CDC class 0x02 does the job; Windows does not use IADs for class 02 (see MS IAD doc). The comm/data pairing comes from the CDC Union descriptor below, exactly as on real CDC devices. */
 	(struct usb_descriptor_header *) &acm_control_interface_desc,
 	(struct usb_descriptor_header *) &acm_header_desc,
 	(struct usb_descriptor_header *) &acm_call_mgmt_descriptor,
@@ -248,7 +248,7 @@ static struct usb_ss_ep_comp_descriptor acm_ss_bulk_comp_desc = {
 };
 
 static struct usb_descriptor_header *acm_ss_function[] = {
-	(struct usb_descriptor_header *) &acm_iad_descriptor,
+	/* IAD removed (b139): device-level CDC class 0x02 does the job; Windows does not use IADs for class 02 (see MS IAD doc). The comm/data pairing comes from the CDC Union descriptor below, exactly as on real CDC devices. */
 	(struct usb_descriptor_header *) &acm_control_interface_desc,
 	(struct usb_descriptor_header *) &acm_header_desc,
 	(struct usb_descriptor_header *) &acm_call_mgmt_descriptor,

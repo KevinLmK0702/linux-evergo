@@ -435,6 +435,14 @@ config BACKLIGHT_LM3639
 	help
 	  This supports TI LM3639 Backlight + 1.5A Flash LED Driver
 
+config BACKLIGHT_LM36273
+	tristate "Backlight and LCD bias driver for LM36273"
+	depends on I2C
+	help
+	  This supports the LM36273 backlight + LCD bias chip used on e.g.
+	  the Xiaomi Redmi Note 11 5G with the K16A panels.  It drives both
+	  the panel's VPOS/VNEG bias rails and the backlight current.
+
 config BACKLIGHT_LP855X
 	tristate "Backlight driver for TI LP855X"
 	depends on I2C && PWM

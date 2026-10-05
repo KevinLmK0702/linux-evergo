@@ -1442,6 +1442,28 @@ static int mtk_i2c_probe(struct platform_device *pdev)
 	}
 
 	i2c->clocks[I2C_MT65XX_CLK_DMA].clk = devm_clk_get(&pdev->dev, "dma");
+	if (PTR_ERR(i2c->clocks[I2C_MT65XX_CLK_DMA].clk) == -ENOENT) {
+		/*
+		 * mt6833: the device trees describe this as CLK_IFRAO_AP_DMA,
+		 * binding id 114, but the mt6833 infra provider registers only the
+		 * 79 gates of clk-mt6833-infra.c's ifrao_clks[] (ids 1..114 with
+		 * holes) and exposes them through a clk_hw_onecell_data sized
+		 * ARRAY_SIZE(ifrao_clks), so a DT reference above that index --
+		 * 114 included -- cannot resolve.  Every i2c controller on this
+		 * SoC failed to probe because of it, which is what kept the
+		 * LM36273 backlight (and with it the DSI panel) deferred forever.
+		 *
+		 * The dma clock is only enabled around transfers, and the DMA path
+		 * is only taken above I2C_DMA_THRESHOLD, which the backlight and
+		 * touch register accesses never reach.  Borrowing the main clock
+		 * keeps the clk_bulk enable/disable pairs balanced (the same
+		 * pointer twice, refcounted) and brings the bus up in FIFO mode.
+		 */
+		dev_warn(&pdev->dev,
+			 "dma clock unavailable, borrowing main clock\n");
+		i2c->clocks[I2C_MT65XX_CLK_DMA].clk =
+			i2c->clocks[I2C_MT65XX_CLK_MAIN].clk;
+	}
 	if (IS_ERR(i2c->clocks[I2C_MT65XX_CLK_DMA].clk)) {
 		dev_err(&pdev->dev, "cannot get dma clock\n");
 		return PTR_ERR(i2c->clocks[I2C_MT65XX_CLK_DMA].clk);

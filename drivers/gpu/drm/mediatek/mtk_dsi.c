@@ -221,6 +221,14 @@ struct mtk_dsi {
 	int refcount;
 	bool enabled;
 	bool lanes_ready;
+	/* C-PHY (trio) mode, and the cycle counts its blanking needs */
+	bool cphy;
+	u32 hs_trail;
+	u32 data_phy_cycle;
+	/* panel-specific C-PHY LP/HS overrides (0 = use computed default) */
+	u32 ovr_hs_prpr;
+	u32 ovr_hs_zero;
+	u32 ovr_hs_trail;
 	u32 irq_data;
 	wait_queue_head_t irq_wait_queue;
 	const struct mtk_dsi_driver_data *driver_data;
@@ -249,22 +257,67 @@ static void mtk_dsi_phy_timconfig(struct mtk_dsi *dsi)
 	u32 data_rate_mhz = DIV_ROUND_UP(dsi->data_rate, HZ_PER_MHZ);
 	struct mtk_phy_timing *timing = &dsi->phy_timing;
 
-	timing->lpx = (60 * data_rate_mhz / (8 * 1000)) + 1;
-	timing->da_hs_prepare = (80 * data_rate_mhz + 4 * 1000) / 8000;
-	timing->da_hs_zero = (170 * data_rate_mhz + 10 * 1000) / 8000 + 1 -
-			     timing->da_hs_prepare;
-	timing->da_hs_trail = timing->da_hs_prepare + 1;
+	if (dsi->cphy) {
+		u32 ui, cycle_time;
 
-	timing->ta_go = 4 * timing->lpx - 2;
-	timing->ta_sure = timing->lpx + 2;
-	timing->ta_get = 4 * timing->lpx;
-	timing->da_hs_exit = 2 * timing->lpx + 1;
+		/*
+		 * C-PHY timings, from the vendor driver's
+		 * mtk_dsi_cphy_timconfig().  The divisions truncate on
+		 * purpose, exactly as they do there.
+		 */
+		ui = 1000 / data_rate_mhz + 1;
+		cycle_time = 8000 / data_rate_mhz + 1;
 
-	timing->clk_hs_prepare = 70 * data_rate_mhz / (8 * 1000);
-	timing->clk_hs_post = timing->clk_hs_prepare + 8;
-	timing->clk_hs_trail = timing->clk_hs_prepare;
-	timing->clk_hs_zero = timing->clk_hs_trail * 4;
-	timing->clk_hs_exit = 2 * timing->clk_hs_trail;
+		timing->lpx = data_rate_mhz * 0x4b / 0x1b58 + 1;
+		timing->da_hs_prepare = (data_rate_mhz / 2 * 101) / 0x1b58 + 1;
+		timing->da_hs_zero = 0x30;
+		timing->da_hs_trail = 0x20;
+
+		timing->ta_get = 5 * (0x55 / cycle_time);
+		timing->ta_sure = 3 * (0x55 / cycle_time) / 2;
+		timing->ta_go = 4 * (0x55 / cycle_time);
+		timing->da_hs_exit = (data_rate_mhz / 2 * 225) / 0x1b58 + 1;
+
+		timing->clk_hs_zero = 0x190 / cycle_time;
+		timing->clk_hs_trail = 0x60 / cycle_time + 1;
+		timing->clk_hs_prepare = 0x40 / cycle_time;
+		timing->clk_hs_exit = 2 * timing->lpx;
+		timing->clk_hs_post = (0x60 + 0x34 * ui) / cycle_time;
+
+		/*
+		 * The panel module may carry its own LP/HS cycle counts, and
+		 * the C-PHY blanking below depends on them, so they have to
+		 * be applied before those register values are derived.
+		 */
+		if (dsi->ovr_hs_prpr)
+			timing->da_hs_prepare = dsi->ovr_hs_prpr;
+		if (dsi->ovr_hs_zero)
+			timing->da_hs_zero = dsi->ovr_hs_zero;
+		if (dsi->ovr_hs_trail)
+			timing->da_hs_trail = dsi->ovr_hs_trail;
+
+		dsi->data_phy_cycle = timing->da_hs_prepare +
+				      timing->da_hs_zero +
+				      timing->da_hs_exit + timing->lpx + 4;
+		dsi->hs_trail = timing->da_hs_trail;
+	} else {
+		timing->lpx = (60 * data_rate_mhz / (8 * 1000)) + 1;
+		timing->da_hs_prepare = (80 * data_rate_mhz + 4 * 1000) / 8000;
+		timing->da_hs_zero = (170 * data_rate_mhz + 10 * 1000) / 8000 + 1 -
+				     timing->da_hs_prepare;
+		timing->da_hs_trail = timing->da_hs_prepare + 1;
+
+		timing->ta_go = 4 * timing->lpx - 2;
+		timing->ta_sure = timing->lpx + 2;
+		timing->ta_get = 4 * timing->lpx;
+		timing->da_hs_exit = 2 * timing->lpx + 1;
+
+		timing->clk_hs_prepare = 70 * data_rate_mhz / (8 * 1000);
+		timing->clk_hs_post = timing->clk_hs_prepare + 8;
+		timing->clk_hs_trail = timing->clk_hs_prepare;
+		timing->clk_hs_zero = timing->clk_hs_trail * 4;
+		timing->clk_hs_exit = 2 * timing->clk_hs_trail;
+	}
 
 	timcon0 = FIELD_PREP(LPX, timing->lpx) |
 		  FIELD_PREP(HS_PREP, timing->da_hs_prepare) |
@@ -500,6 +553,64 @@ static void mtk_dsi_config_vdo_timing_per_frame_lp(struct mtk_dsi *dsi)
 	writel(horizontal_frontporch_byte, dsi->regs + DSI_HFP_WC);
 }
 
+/*
+ * C-PHY per-line-LP timing, ported from the vendor driver's
+ * mtk_dsi_config_vdo_timing() C-PHY branch.
+ *
+ * The byte counts have to account for the 16/7 coding and for the fact that
+ * every HS entry and exit takes dsi->data_phy_cycle symbol periods on all
+ * trios - there is no clock lane for them to hide behind.  That is why this
+ * shares no formula with the D-PHY version.
+ */
+static void mtk_dsi_config_vdo_timing_cphy(struct mtk_dsi *dsi)
+{
+	u32 horizontal_sync_active_byte;
+	u32 horizontal_backporch_byte;
+	u32 horizontal_frontporch_byte;
+	u32 dsi_tmp_buf_bpp;
+	struct videomode *vm = &dsi->vm;
+
+	if (dsi->format == MIPI_DSI_FMT_RGB565)
+		dsi_tmp_buf_bpp = 2;
+	else
+		dsi_tmp_buf_bpp = 3;
+
+	if (vm->hsync_len * dsi_tmp_buf_bpp < 10 * dsi->lanes + 26 + 5)
+		horizontal_sync_active_byte = 4;
+	else
+		horizontal_sync_active_byte =
+			ALIGN(vm->hsync_len * dsi_tmp_buf_bpp -
+			      10 * dsi->lanes - 26, 2);
+
+	if (vm->hback_porch * dsi_tmp_buf_bpp < 12 * dsi->lanes + 26 + 5)
+		horizontal_backporch_byte = 4;
+	else
+		horizontal_backporch_byte =
+			ALIGN(vm->hback_porch * dsi_tmp_buf_bpp -
+			      12 * dsi->lanes - 26, 2);
+
+	if (vm->hfront_porch * dsi_tmp_buf_bpp <
+	    10 * dsi->lanes + 24 + 2 * dsi->data_phy_cycle * dsi->lanes + 9)
+		horizontal_frontporch_byte = 8;
+	else if (vm->hfront_porch * dsi_tmp_buf_bpp >
+		 10 * dsi->lanes + 24 + 2 * dsi->data_phy_cycle * dsi->lanes + 8 &&
+		 vm->hfront_porch * dsi_tmp_buf_bpp <
+		 10 * dsi->lanes + 24 + 2 * dsi->data_phy_cycle * dsi->lanes +
+		 2 * (dsi->hs_trail + 1) * dsi->lanes - 6 * dsi->lanes - 14)
+		horizontal_frontporch_byte =
+			2 * (dsi->hs_trail + 1) * dsi->lanes -
+			6 * dsi->lanes - 14;
+	else
+		horizontal_frontporch_byte =
+			vm->hfront_porch * dsi_tmp_buf_bpp -
+			10 * dsi->lanes - 24 -
+			2 * dsi->data_phy_cycle * dsi->lanes;
+
+	writel(horizontal_sync_active_byte, dsi->regs + DSI_HSA_WC);
+	writel(horizontal_backporch_byte, dsi->regs + DSI_HBP_WC);
+	writel(horizontal_frontporch_byte, dsi->regs + DSI_HFP_WC);
+}
+
 static void mtk_dsi_config_vdo_timing_per_line_lp(struct mtk_dsi *dsi)
 {
 	u32 horizontal_sync_active_byte;
@@ -579,7 +690,9 @@ static void mtk_dsi_config_vdo_timing(struct mtk_dsi *dsi)
 			FIELD_PREP(DSI_WIDTH, vm->hactive),
 			dsi->regs + DSI_SIZE_CON);
 
-	if (dsi->driver_data->support_per_frame_lp)
+	if (dsi->cphy)
+		mtk_dsi_config_vdo_timing_cphy(dsi);
+	else if (dsi->driver_data->support_per_frame_lp)
 		mtk_dsi_config_vdo_timing_per_frame_lp(dsi);
 	else
 		mtk_dsi_config_vdo_timing_per_line_lp(dsi);
@@ -707,8 +820,21 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 	}
 	bit_per_pixel = ret;
 
-	dsi->data_rate = DIV_ROUND_UP_ULL(dsi->vm.pixelclock * bit_per_pixel,
-					  dsi->lanes);
+	if (dsi->cphy)
+		/*
+		 * In C-PHY mode the PHY PLL runs at the symbol rate of one
+		 * trio: the total bit rate shrunk by the 16/7 coding and split
+		 * over the trios.  The vendor's panel "data_rate" parameter is
+		 * that same symbol rate, so the two agree at ~1063 MHz for the
+		 * K16A panels.
+		 */
+		dsi->data_rate = DIV_ROUND_UP_ULL(dsi->vm.pixelclock *
+						  bit_per_pixel * 7,
+						  dsi->lanes * 16);
+	else
+		dsi->data_rate = DIV_ROUND_UP_ULL(dsi->vm.pixelclock *
+						  bit_per_pixel,
+						  dsi->lanes);
 
 	ret = clk_set_rate(dsi->hs_clk, dsi->data_rate);
 	if (ret < 0) {
@@ -875,13 +1001,30 @@ mtk_dsi_bridge_mode_valid(struct drm_bridge *bridge,
 			  const struct drm_display_mode *mode)
 {
 	struct mtk_dsi *dsi = bridge_to_dsi(bridge);
+	unsigned int rate;
 	int bpp;
 
 	bpp = mipi_dsi_pixel_format_to_bpp(dsi->format);
 	if (bpp < 0)
 		return MODE_ERROR;
 
-	if (mode->clock * bpp / dsi->lanes > 1500000)
+	rate = mode->clock * bpp / dsi->lanes;
+
+	/*
+	 * C-PHY (three trios, 16 levels per wire) carries about 2.3 bits per
+	 * symbol, so the D-PHY style "kbit/s per lane" figure above overstates
+	 * the rate by more than a factor of two on a three-trio link.  The CSOT
+	 * k16a module is exactly that: 1080x2400@60 with RGB888 works out to
+	 * 2429 kbit/s per trio in D-PHY terms, i.e. only ~1.06 Gsymbol/s -
+	 * comfortably inside what the mt6833 MIPI TX does, and the vendor
+	 * kernel drives the very same panel at this rate.  Without this the
+	 * mode is rejected as CLOCK_HIGH, drm_client_setup() finds no mode and
+	 * there is no fbdev (and therefore no fbcon) at all.
+	 */
+	if (dsi->cphy)
+		rate = rate * 10 / 23;
+
+	if (rate > 1500000)
 		return MODE_CLOCK_HIGH;
 
 	return MODE_OK;
@@ -1213,6 +1356,21 @@ static int mtk_dsi_probe(struct platform_device *pdev)
 
 	dsi->driver_data = of_device_get_match_data(dev);
 
+	/*
+	 * C-PHY is a property of the board's DSI wiring, not of the SoC, so
+	 * it is described by the DSI node.  The optional LP/HS overrides are
+	 * the panel module's own cycle counts; the K16A panels carry 11/35/26.
+	 */
+	dsi->cphy = device_property_read_bool(dev, "mediatek,cphy");
+	if (dsi->cphy) {
+		device_property_read_u32(dev, "mediatek,hs-prpr",
+					 &dsi->ovr_hs_prpr);
+		device_property_read_u32(dev, "mediatek,hs-zero",
+					 &dsi->ovr_hs_zero);
+		device_property_read_u32(dev, "mediatek,hs-trail",
+					 &dsi->ovr_hs_trail);
+	}
+
 	dsi->engine_clk = devm_clk_get(dev, "engine");
 	if (IS_ERR(dsi->engine_clk))
 		return dev_err_probe(dev, PTR_ERR(dsi->engine_clk),
@@ -1313,6 +1471,7 @@ static const struct mtk_dsi_driver_data mt8188_dsi_driver_data = {
 static const struct of_device_id mtk_dsi_of_match[] = {
 	{ .compatible = "mediatek,mt2701-dsi", .data = &mt2701_dsi_driver_data },
 	{ .compatible = "mediatek,mt8167-dsi", .data = &mt2701_dsi_driver_data },
+	{ .compatible = "mediatek,mt6833-dsi", .data = &mt8183_dsi_driver_data },
 	{ .compatible = "mediatek,mt8173-dsi", .data = &mt8173_dsi_driver_data },
 	{ .compatible = "mediatek,mt8183-dsi", .data = &mt8183_dsi_driver_data },
 	{ .compatible = "mediatek,mt8186-dsi", .data = &mt8186_dsi_driver_data },

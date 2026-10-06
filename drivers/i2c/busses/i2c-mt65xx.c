@@ -35,6 +35,24 @@
 #define I2C_TRANSAC_START		(1 << 0)
 #define I2C_RS_MUL_CNFG			(1 << 15)
 #define I2C_RS_MUL_TRIG			(1 << 14)
+/*
+ * mt6833 interrupt status bits that the vendor driver (i2c-mtk.h) defines
+ * but the mainline driver does not know about.  A failed APDMA transfer
+ * raises I2C_DMAERR; without a definition here the interrupt just looks
+ * unknown and the transfer waits for the full adapter timeout.
+ */
+#define I2C_TIMEOUT			(1 << 5)
+#define I2C_DMAERR			(1 << 6)
+#define I2C_IBI				(1 << 7)
+#define I2C_BUS_ERR			(1 << 8)
+/* all status bits this IP can report, extended ones included */
+#define I2C_INTR_ALL	(I2C_TRANSAC_COMP | I2C_ACKERR | I2C_HS_NACKERR | \
+			 I2C_ARB_LOST | I2C_TIMEOUT | I2C_DMAERR | I2C_IBI | \
+			 I2C_BUS_ERR)
+/* vendor "ver 2" SoCs: interrupt routing to the AP (MCU), register 0x40 */
+#define I2C_MCU_INTR_EN			0x0001
+/* vendor "ver 2": hardware timeout enable, OR'ed into the timing register */
+#define I2C_TIMEOUT_EN			0x0001
 #define I2C_DCM_DISABLE			0x0000
 #define I2C_IO_CONFIG_OPEN_DRAIN	0x0003
 #define I2C_IO_CONFIG_PUSH_PULL		0x0000
@@ -269,6 +287,13 @@ struct mtk_i2c_compatible {
 	unsigned char dma_sync: 1;
 	unsigned char ltiming_adjust: 1;
 	unsigned char apdma_sync: 1;
+	/*
+	 * mt6833-style DMA quirks, taken from the vendor driver's "ver 2"
+	 * path: reset the PDMA channel when its EN register is still set,
+	 * and route the controller interrupts to the AP (MCU_INTR_EN at
+	 * register 0x40) before every transfer.
+	 */
+	unsigned char vendor_dma_quirks: 1;
 	unsigned char max_dma_support;
 };
 
@@ -307,6 +332,8 @@ struct mtk_i2c {
 	u16 ltiming_reg;
 	unsigned char auto_restart;
 	bool ignore_restart_irq;
+	bool fifo_block_dead;		/* b225: register file gone; fail fast */
+	int irq;			/* b225: our IRQ, disabled on block death */
 	struct mtk_i2c_ac_timing ac_timing;
 	const struct mtk_i2c_compatible *dev_comp;
 };
@@ -373,6 +400,35 @@ static const struct mtk_i2c_compatible mt2712_compat = {
 	.dma_sync = 0,
 	.ltiming_adjust = 0,
 	.apdma_sync = 0,
+	.max_dma_support = 33,
+};
+
+/*
+ * mt6833: the vendor driver describes this IP as register set "ver 2" with
+ * "dma_ver 1".  "ver 2" is the same register set mt8183/mt8186 use (v2 in
+ * this driver: CLOCK_DIV 0x48, FIFO_STAT 0xf4, DEBUGSTAT 0xe4, HS 0x30,
+ * IO_CONFIG 0x34), and the DMA handshake is the mt8183 generation one:
+ * CONTROL needs DMAACK_EN|ASYNC_MODE and the PDMA CON register needs
+ * SKIP_CONFIG|ASYNC_MODE.  With the old v1 offsets the controller never
+ * starts a transaction at all (the CLOCK_DIV write at 0x70 does not even
+ * stick, no interrupt ever fires and every transfer times out).
+ */
+	/*
+	 * The vendor driver only uses the plain transaction start on this IP
+	 * and never enables the multi/restart trigger (RS_MUL_TRIG).  With
+	 * auto_restart set the engine never started the bus at all.
+	 */
+static const struct mtk_i2c_compatible mt6833_compat = {
+	.regs = mt_i2c_regs_v2,
+	.pmic_i2c = 0,
+	.dcm = 0,
+	.auto_restart = 0,
+	.aux_len_reg = 1,
+	.timing_adjust = 1,
+	.dma_sync = 1,
+	.ltiming_adjust = 1,
+	.apdma_sync = 1,
+	.vendor_dma_quirks = 1,
 	.max_dma_support = 33,
 };
 
@@ -525,6 +581,7 @@ static const struct mtk_i2c_compatible mt8192_compat = {
 
 static const struct of_device_id mtk_i2c_of_match[] = {
 	{ .compatible = "mediatek,mt2712-i2c", .data = &mt2712_compat },
+	{ .compatible = "mediatek,mt6833-i2c", .data = &mt6833_compat },
 	{ .compatible = "mediatek,mt6577-i2c", .data = &mt6577_compat },
 	{ .compatible = "mediatek,mt6589-i2c", .data = &mt6589_compat },
 	{ .compatible = "mediatek,mt7622-i2c", .data = &mt7622_compat },
@@ -589,7 +646,13 @@ static void mtk_i2c_init_hw(struct mtk_i2c *i2c)
 	if (i2c->dev_comp->dcm)
 		mtk_i2c_writew(i2c, I2C_DCM_DISABLE, OFFSET_DCM_EN);
 
-	mtk_i2c_writew(i2c, i2c->timing_reg, OFFSET_TIMING);
+	/*
+	 * Vendor "ver 2" writes the hardware timeout enable along with the
+	 * timing register (I2C_TIMEOUT_EN, bit 0).
+	 */
+	mtk_i2c_writew(i2c, i2c->timing_reg |
+		       (i2c->dev_comp->vendor_dma_quirks ? I2C_TIMEOUT_EN : 0),
+		       OFFSET_TIMING);
 	mtk_i2c_writew(i2c, i2c->high_speed_reg, OFFSET_HS);
 	if (i2c->dev_comp->ltiming_adjust)
 		mtk_i2c_writew(i2c, i2c->ltiming_reg, OFFSET_LTIMING);
@@ -601,12 +664,22 @@ static void mtk_i2c_init_hw(struct mtk_i2c *i2c)
 
 	if (i2c->dev_comp->timing_adjust) {
 		ext_conf_val = i2c->ac_timing.ext;
-		mtk_i2c_writew(i2c, i2c->ac_timing.inter_clk_div,
-			       OFFSET_CLOCK_DIV);
-		mtk_i2c_writew(i2c, I2C_SCL_MIS_COMP_VALUE,
-			       OFFSET_SCL_MIS_COMP_POINT);
-		mtk_i2c_writew(i2c, i2c->ac_timing.sda_timing,
-			       OFFSET_SDA_TIMING);
+		/*
+		 * The vendor driver writes the clock divider as a packed pair
+		 * ((div - 1) << 8 | (div - 1)) on this IP, and never touches the
+		 * SCL mis-compensation / SDA timing registers.
+		 */
+		if (i2c->dev_comp->vendor_dma_quirks) {
+			mtk_i2c_writew(i2c, ((i2c->clk_src_div - 1) << 8) |
+				       (i2c->clk_src_div - 1), OFFSET_CLOCK_DIV);
+		} else {
+			mtk_i2c_writew(i2c, i2c->ac_timing.inter_clk_div,
+				       OFFSET_CLOCK_DIV);
+			mtk_i2c_writew(i2c, I2C_SCL_MIS_COMP_VALUE,
+				       OFFSET_SCL_MIS_COMP_POINT);
+			mtk_i2c_writew(i2c, i2c->ac_timing.sda_timing,
+				       OFFSET_SDA_TIMING);
+		}
 
 		if (i2c->dev_comp->ltiming_adjust) {
 			mtk_i2c_writew(i2c, i2c->ac_timing.htiming,
@@ -944,53 +1017,175 @@ static void mtk_i2c_set_speed(struct mtk_i2c *i2c, unsigned int parent_clk)
 
 static void i2c_dump_register(struct mtk_i2c *i2c)
 {
-	dev_dbg(i2c->dev, "SLAVE_ADDR: 0x%x, INTR_MASK: 0x%x\n",
+	dev_err(i2c->dev, "SLAVE_ADDR: 0x%x, INTR_MASK: 0x%x\n",
 		mtk_i2c_readw(i2c, OFFSET_SLAVE_ADDR),
 		mtk_i2c_readw(i2c, OFFSET_INTR_MASK));
-	dev_dbg(i2c->dev, "INTR_STAT: 0x%x, CONTROL: 0x%x\n",
+	dev_err(i2c->dev, "INTR_STAT: 0x%x, CONTROL: 0x%x\n",
 		mtk_i2c_readw(i2c, OFFSET_INTR_STAT),
 		mtk_i2c_readw(i2c, OFFSET_CONTROL));
-	dev_dbg(i2c->dev, "TRANSFER_LEN: 0x%x, TRANSAC_LEN: 0x%x\n",
+	dev_err(i2c->dev, "TRANSFER_LEN: 0x%x, TRANSAC_LEN: 0x%x\n",
 		mtk_i2c_readw(i2c, OFFSET_TRANSFER_LEN),
 		mtk_i2c_readw(i2c, OFFSET_TRANSAC_LEN));
-	dev_dbg(i2c->dev, "DELAY_LEN: 0x%x, HTIMING: 0x%x\n",
+	dev_err(i2c->dev, "DELAY_LEN: 0x%x, HTIMING: 0x%x\n",
 		mtk_i2c_readw(i2c, OFFSET_DELAY_LEN),
 		mtk_i2c_readw(i2c, OFFSET_TIMING));
-	dev_dbg(i2c->dev, "START: 0x%x, EXT_CONF: 0x%x\n",
+	dev_err(i2c->dev, "START: 0x%x, EXT_CONF: 0x%x\n",
 		mtk_i2c_readw(i2c, OFFSET_START),
 		mtk_i2c_readw(i2c, OFFSET_EXT_CONF));
-	dev_dbg(i2c->dev, "HS: 0x%x, IO_CONFIG: 0x%x\n",
+	dev_err(i2c->dev, "HS: 0x%x, IO_CONFIG: 0x%x\n",
 		mtk_i2c_readw(i2c, OFFSET_HS),
 		mtk_i2c_readw(i2c, OFFSET_IO_CONFIG));
-	dev_dbg(i2c->dev, "DCM_EN: 0x%x, TRANSFER_LEN_AUX: 0x%x\n",
+	dev_err(i2c->dev, "DCM_EN: 0x%x, TRANSFER_LEN_AUX: 0x%x\n",
 		mtk_i2c_readw(i2c, OFFSET_DCM_EN),
 		mtk_i2c_readw(i2c, OFFSET_TRANSFER_LEN_AUX));
-	dev_dbg(i2c->dev, "CLOCK_DIV: 0x%x, FIFO_STAT: 0x%x\n",
+	dev_err(i2c->dev, "CLOCK_DIV: 0x%x, FIFO_STAT: 0x%x\n",
 		mtk_i2c_readw(i2c, OFFSET_CLOCK_DIV),
 		mtk_i2c_readw(i2c, OFFSET_FIFO_STAT));
-	dev_dbg(i2c->dev, "DEBUGCTRL : 0x%x, DEBUGSTAT: 0x%x\n",
+	dev_err(i2c->dev, "DEBUGCTRL : 0x%x, DEBUGSTAT: 0x%x\n",
 		mtk_i2c_readw(i2c, OFFSET_DEBUGCTRL),
 		mtk_i2c_readw(i2c, OFFSET_DEBUGSTAT));
 	if (i2c->dev_comp->regs == mt_i2c_regs_v2) {
-		dev_dbg(i2c->dev, "LTIMING: 0x%x, MULTI_DMA: 0x%x\n",
+		dev_err(i2c->dev, "LTIMING: 0x%x, MULTI_DMA: 0x%x\n",
 			mtk_i2c_readw(i2c, OFFSET_LTIMING),
 			mtk_i2c_readw(i2c, OFFSET_MULTI_DMA));
 	}
-	dev_dbg(i2c->dev, "\nDMA_INT_FLAG: 0x%x, DMA_INT_EN: 0x%x\n",
+	dev_err(i2c->dev, "\nDMA_INT_FLAG: 0x%x, DMA_INT_EN: 0x%x\n",
 		readl(i2c->pdmabase + OFFSET_INT_FLAG),
 		readl(i2c->pdmabase + OFFSET_INT_EN));
-	dev_dbg(i2c->dev, "DMA_EN: 0x%x, DMA_CON: 0x%x\n",
+	dev_err(i2c->dev, "DMA_EN: 0x%x, DMA_CON: 0x%x\n",
 		readl(i2c->pdmabase + OFFSET_EN),
 		readl(i2c->pdmabase + OFFSET_CON));
-	dev_dbg(i2c->dev, "DMA_TX_MEM_ADDR: 0x%x, DMA_RX_MEM_ADDR: 0x%x\n",
+	dev_err(i2c->dev, "DMA_TX_MEM_ADDR: 0x%x, DMA_RX_MEM_ADDR: 0x%x\n",
 		readl(i2c->pdmabase + OFFSET_TX_MEM_ADDR),
 		readl(i2c->pdmabase + OFFSET_RX_MEM_ADDR));
-	dev_dbg(i2c->dev, "DMA_TX_LEN: 0x%x, DMA_RX_LEN: 0x%x\n",
+	dev_err(i2c->dev, "DMA_TX_LEN: 0x%x, DMA_RX_LEN: 0x%x\n",
 		readl(i2c->pdmabase + OFFSET_TX_LEN),
 		readl(i2c->pdmabase + OFFSET_RX_LEN));
-	dev_dbg(i2c->dev, "DMA_TX_4G_MODE: 0x%x, DMA_RX_4G_MODE: 0x%x",
+	dev_err(i2c->dev, "DMA_TX_4G_MODE: 0x%x, DMA_RX_4G_MODE: 0x%x",
 		readl(i2c->pdmabase + OFFSET_TX_4G_MODE),
 		readl(i2c->pdmabase + OFFSET_RX_4G_MODE));
+}
+
+/* bring-up debug: print the register-file state once per boot */
+static bool first_xfer_reported;
+static bool first_fifo_reported;
+
+/*
+ * b217: the vendor driver never uses DMA for transfers up to 8 bytes --
+ * everything small goes through the FIFO (their isDMA threshold is
+ * total_len > 8).  On this board every DMA transfer that failed left the
+ * PDMA stuck (EN=0x3), the register file degraded to all-0x0 / all-0x700
+ * and the SoC eventually froze hard mid-sweep (b214/b216).  All small
+ * transfers here are register accesses <= 8 bytes, so route them through
+ * the vendor's FIFO sequence instead.
+ */
+static bool mtk_i2c_fifo_small(struct mtk_i2c *i2c, struct i2c_msg *msgs,
+			       int num)
+{
+	if (i2c->op == I2C_MASTER_WRRD)
+		return msgs[0].len <= 8 && msgs[1].len <= 8;
+	if (num == 1)
+		return msgs[0].len <= 8;
+	return false;
+}
+
+static int mtk_i2c_do_transfer_fifo(struct mtk_i2c *i2c, struct i2c_msg *msgs)
+{
+	u16 control_reg, addr_reg;
+	int ret, i;
+
+	i2c->irq_stat = 0;
+	reinit_completion(&i2c->msg_complete);
+
+	if (!first_fifo_reported) {
+		first_fifo_reported = true;
+		dev_err(i2c->dev, "fifo path active (addr 0x%x op %d)\n",
+			msgs[0].addr, i2c->op);
+	}
+
+	/* FIFO mode: no DMA bits in CONTROL (vendor sequence) */
+	control_reg = I2C_CONTROL_ACKERR_DET_EN | I2C_CONTROL_CLK_EXT_EN;
+	if (i2c->op == I2C_MASTER_WRRD)
+		control_reg |= I2C_CONTROL_DIR_CHANGE | I2C_CONTROL_RS;
+	mtk_i2c_writew(i2c, control_reg, OFFSET_CONTROL);
+
+	addr_reg = i2c_8bit_addr_from_msg(msgs);
+	if (i2c->op == I2C_MASTER_RD)
+		addr_reg |= 0x1;	/* vendor sets the R/W bit for FIFO reads */
+	mtk_i2c_writew(i2c, addr_reg, OFFSET_SLAVE_ADDR);
+
+	mtk_i2c_writew(i2c, I2C_INTR_ALL, OFFSET_INTR_STAT);
+	mtk_i2c_writew(i2c, I2C_FIFO_ADDR_CLR, OFFSET_FIFO_ADDR_CLR);
+	mtk_i2c_writew(i2c, I2C_INTR_ALL, OFFSET_INTR_MASK);
+
+	if (i2c->op == I2C_MASTER_WRRD) {
+		mtk_i2c_writew(i2c, msgs[0].len, OFFSET_TRANSFER_LEN);
+		mtk_i2c_writew(i2c, msgs[1].len, OFFSET_TRANSFER_LEN_AUX);
+		mtk_i2c_writew(i2c, 0x2, OFFSET_TRANSAC_LEN);
+	} else {
+		mtk_i2c_writew(i2c, msgs[0].len, OFFSET_TRANSFER_LEN);
+		mtk_i2c_writew(i2c, 0x1, OFFSET_TRANSAC_LEN);
+	}
+
+	if (i2c->op != I2C_MASTER_RD) {
+		for (i = 0; i < msgs[0].len; i++)
+			writeb(msgs[0].buf[i], i2c->base + OFFSET_DATA_PORT);
+	}
+
+	mtk_i2c_writew(i2c, I2C_TRANSAC_START, OFFSET_START);
+
+	ret = wait_for_completion_timeout(&i2c->msg_complete,
+					  i2c->adap.timeout);
+
+	mtk_i2c_writew(i2c, ~I2C_INTR_ALL, OFFSET_INTR_MASK);
+
+	if (ret == 0) {
+		dev_err(i2c->dev,
+			"fifo addr %x: timeout (slave=0x%x ctrl=0x%x start=0x%x dbg=0x%x irq=0x%x)\n",
+			msgs[0].addr,
+			mtk_i2c_readw(i2c, OFFSET_SLAVE_ADDR),
+			mtk_i2c_readw(i2c, OFFSET_CONTROL),
+			mtk_i2c_readw(i2c, OFFSET_START),
+			mtk_i2c_readw(i2c, OFFSET_DEBUGSTAT),
+			i2c->irq_stat);
+		/*
+		 * b225: do NOT re-init here.  Every build that "recovered" the
+		 * block this way (b208-b224) watched it die again right away,
+		 * and the recovery churn itself is the prime suspect for the
+		 * b224 hard hang.  Declare the block dead instead: mark it,
+		 * disarm the level-triggered IRQ so a parked error bit cannot
+		 * storm, and make every further transfer fail without touching
+		 * the hardware.
+		 */
+		if (!i2c->fifo_block_dead) {
+			i2c->fifo_block_dead = true;
+			disable_irq_nosync(i2c->irq);
+			dev_err(i2c->dev,
+				"fifo: block dead (reads 0xf00); IRQ %d disabled, further transfers fail fast\n",
+				i2c->irq);
+		}
+		return -ETIMEDOUT;
+	}
+
+	if (i2c->irq_stat & (I2C_HS_NACKERR | I2C_ACKERR))
+		return -ENXIO;	/* plain NACK; no re-init (b216) */
+
+	if (i2c->irq_stat & (I2C_TIMEOUT | I2C_DMAERR | I2C_BUS_ERR)) {
+		dev_err(i2c->dev, "fifo addr %x: irq_stat=0x%x\n",
+			msgs[0].addr, i2c->irq_stat);
+		mtk_i2c_init_hw(i2c);
+		return -EIO;
+	}
+
+	if (i2c->op == I2C_MASTER_WRRD) {
+		for (i = 0; i < msgs[1].len; i++)
+			msgs[1].buf[i] = readb(i2c->base + OFFSET_DATA_PORT);
+	} else if (i2c->op == I2C_MASTER_RD) {
+		for (i = 0; i < msgs[0].len; i++)
+			msgs[0].buf[i] = readb(i2c->base + OFFSET_DATA_PORT);
+	}
+
+	return 0;
 }
 
 static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
@@ -1008,6 +1203,7 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
 	dma_addr_t rpaddr = 0;
 	dma_addr_t wpaddr = 0;
 	int ret;
+	int retry;
 
 	i2c->irq_stat = 0;
 
@@ -1038,6 +1234,68 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
 			       OFFSET_DEBUGCTRL);
 	}
 
+	/*
+	 * mt6833: the PDMA channel can still be running from a previous
+	 * aborted transfer -- the vendor driver resets it whenever EN is
+	 * set.  It also routes the controller interrupts to the AP (MCU)
+	 * before every transfer on its "ver 2" path.
+	 */
+	if (i2c->dev_comp->vendor_dma_quirks) {
+		u16 pre, post;
+
+		if (readl(i2c->pdmabase + OFFSET_EN)) {
+			writel(I2C_DMA_WARM_RST, i2c->pdmabase + OFFSET_RST);
+			udelay(5);
+		}
+		/*
+		 * Bring-up quirk (b208-b215): after a cold clock-enable the
+		 * register file can read back 0x0/0xf00 ("dead").  Run the full
+		 * init sequence until it answers; one init_hw may not be enough
+		 * (b213 needed a second one).
+		 */
+		pre = mtk_i2c_readw(i2c, OFFSET_SLAVE_ADDR);
+		for (retry = 0; retry < 3; retry++) {
+			if (pre != 0x0 && pre != 0xf00)
+				break;
+			mtk_i2c_init_hw(i2c);
+			usleep_range(1000, 2000);
+			pre = mtk_i2c_readw(i2c, OFFSET_SLAVE_ADDR);
+		}
+		/*
+		 * b214 (which dropped this poke and the 0x54 write) never woke
+		 * the block once: every transfer hit the 2 s timeout with an
+		 * all-zero register file.  b213, which had both, came back to
+		 * life after the first failed transfer.  One of the two is
+		 * functionally required on this IP -- keep both.
+		 */
+		mtk_i2c_writew(i2c, 0x00a5, OFFSET_SLAVE_ADDR);
+		post = mtk_i2c_readw(i2c, OFFSET_SLAVE_ADDR);
+		mtk_i2c_writew(i2c, pre, OFFSET_SLAVE_ADDR);
+		if (!first_xfer_reported) {
+			first_xfer_reported = true;
+			dev_err(i2c->dev,
+				"first xfer: SLAVE_ADDR pre=0x%x post=0x%x\n",
+				pre, post);
+		}
+		/*
+		 * 0x54 = vendor V2_OFFSET_TRAFFIC on this IP (v1 called it
+		 * DCM_EN; their v2 driver never writes it).  Cleared on every
+		 * transfer in every working version -- keep it.
+		 */
+		writew(0x0000, i2c->base + 0x54);
+		/* vendor delay length (their comment: "not use 0x02") */
+		mtk_i2c_writew(i2c, 0x000a, OFFSET_DELAY_LEN);
+		/*
+		 * NOTE: never write register 0x40 (vendor MCU_INTR): on the real
+		 * mt6833 writing 1 there kills the whole register file (reads
+		 * 0xf00) until the next power cycle (b209).
+		 */
+	}
+	/* small transfers: vendor-proven FIFO path instead of DMA (b217) */
+	if (i2c->dev_comp->vendor_dma_quirks &&
+	    mtk_i2c_fifo_small(i2c, msgs, num))
+		return mtk_i2c_do_transfer_fifo(i2c, msgs);
+
 	control_reg = mtk_i2c_readw(i2c, OFFSET_CONTROL) &
 			~(I2C_CONTROL_DIR_CHANGE | I2C_CONTROL_RS);
 	if ((i2c->speed_hz > I2C_MAX_FAST_MODE_PLUS_FREQ) || (left_num >= 1))
@@ -1051,15 +1309,13 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
 	addr_reg = i2c_8bit_addr_from_msg(msgs);
 	mtk_i2c_writew(i2c, addr_reg, OFFSET_SLAVE_ADDR);
 
-	/* Clear interrupt status */
-	mtk_i2c_writew(i2c, restart_flag | I2C_HS_NACKERR | I2C_ACKERR |
-			    I2C_ARB_LOST | I2C_TRANSAC_COMP, OFFSET_INTR_STAT);
+	/* Clear interrupt status (extended bits included) */
+	mtk_i2c_writew(i2c, restart_flag | I2C_INTR_ALL, OFFSET_INTR_STAT);
 
 	mtk_i2c_writew(i2c, I2C_FIFO_ADDR_CLR, OFFSET_FIFO_ADDR_CLR);
 
-	/* Enable interrupt */
-	mtk_i2c_writew(i2c, restart_flag | I2C_HS_NACKERR | I2C_ACKERR |
-			    I2C_ARB_LOST | I2C_TRANSAC_COMP, OFFSET_INTR_MASK);
+	/* Enable interrupt (extended error bits included) */
+	mtk_i2c_writew(i2c, restart_flag | I2C_INTR_ALL, OFFSET_INTR_MASK);
 
 	/* Set transfer and transaction len */
 	if (i2c->op == I2C_MASTER_WRRD) {
@@ -1197,9 +1453,8 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
 	ret = wait_for_completion_timeout(&i2c->msg_complete,
 					  i2c->adap.timeout);
 
-	/* Clear interrupt mask */
-	mtk_i2c_writew(i2c, ~(restart_flag | I2C_HS_NACKERR | I2C_ACKERR |
-			    I2C_ARB_LOST | I2C_TRANSAC_COMP), OFFSET_INTR_MASK);
+	/* Clear interrupt mask (extended bits included, never leave them on) */
+	mtk_i2c_writew(i2c, ~(restart_flag | I2C_INTR_ALL), OFFSET_INTR_MASK);
 
 	if (i2c->op == I2C_MASTER_WR) {
 		dma_unmap_single(i2c->dev, wpaddr,
@@ -1222,15 +1477,50 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
 	}
 
 	if (ret == 0) {
-		dev_dbg(i2c->dev, "addr: %x, transfer timeout\n", msgs->addr);
+		dev_err(i2c->dev, "addr: %x, transfer timeout\n", msgs->addr);
 		i2c_dump_register(i2c);
+		dev_err(i2c->dev, "op=%d speed=%u irq_stat=0x%x main=%lu dma=%lu\n",
+			i2c->op, i2c->speed_hz, i2c->irq_stat,
+			clk_get_rate(i2c->clocks[I2C_MT65XX_CLK_MAIN].clk),
+			clk_get_rate(i2c->clocks[I2C_MT65XX_CLK_DMA].clk));
+		if (i2c->irq_stat & (I2C_TIMEOUT | I2C_DMAERR | I2C_IBI | I2C_BUS_ERR))
+			dev_err(i2c->dev,
+				"irq decode: i2c_timeout=%u dmaerr=%u ibi=%u bus_err=%u\n",
+				!!(i2c->irq_stat & I2C_TIMEOUT),
+				!!(i2c->irq_stat & I2C_DMAERR),
+				!!(i2c->irq_stat & I2C_IBI),
+				!!(i2c->irq_stat & I2C_BUS_ERR));
 		mtk_i2c_init_hw(i2c);
+		dev_err(i2c->dev, "after init_hw: CONTROL=0x%x START=0x%x DEBUGSTAT=0x%x\n",
+			mtk_i2c_readw(i2c, OFFSET_CONTROL),
+			mtk_i2c_readw(i2c, OFFSET_START),
+			mtk_i2c_readw(i2c, OFFSET_DEBUGSTAT));
+		mtk_i2c_writew(i2c, 0x5a5a, OFFSET_SLAVE_ADDR);
+		dev_err(i2c->dev, "wr-rd test: SLAVE_ADDR wrote 0x5a5a, read 0x%x\n",
+			mtk_i2c_readw(i2c, OFFSET_SLAVE_ADDR));
 		return -ETIMEDOUT;
 	}
 
-	if (i2c->irq_stat & (I2C_HS_NACKERR | I2C_ACKERR)) {
-		dev_dbg(i2c->dev, "addr: %x, transfer ACK error\n", msgs->addr);
+	if (i2c->irq_stat & (I2C_TIMEOUT | I2C_DMAERR | I2C_BUS_ERR)) {
+		dev_err(i2c->dev,
+			"addr: %x, transfer failed: irq_stat=0x%x dmaerr=%u bus_err=%u tmo=%u\n",
+			msgs->addr, i2c->irq_stat,
+			!!(i2c->irq_stat & I2C_DMAERR),
+			!!(i2c->irq_stat & I2C_BUS_ERR),
+			!!(i2c->irq_stat & I2C_TIMEOUT));
 		mtk_i2c_init_hw(i2c);
+		return -EIO;
+	}
+
+	if (i2c->irq_stat & (I2C_HS_NACKERR | I2C_ACKERR)) {
+		/*
+		 * A plain NACK is a normal bus event, not a broken block.  Do
+		 * NOT re-run the full init sequence here: b213 (24 NACK-ish
+		 * failures, init_hw after each) and b214 (~70 timeouts, same)
+		 * both ended with the register file wedged and a watchdog
+		 * reset minutes later.  The vendor does not re-init either.
+		 */
+		dev_err(i2c->dev, "addr: %x, transfer ACK error, DEBUGSTAT=0x%x\n", msgs->addr, mtk_i2c_readw(i2c, OFFSET_DEBUGSTAT));
 		return -ENXIO;
 	}
 
@@ -1244,6 +1534,19 @@ static int mtk_i2c_transfer(struct i2c_adapter *adap,
 	int left_num = num;
 	bool write_then_read_en = false;
 	struct mtk_i2c *i2c = i2c_get_adapdata(adap);
+
+	/*
+	 * b225: once a transfer timed out on the dead register file (slave
+	 * addr / control / start all read back 0xf00, writes ignored -- the
+	 * state this block enters within seconds of every boot since b208),
+	 * every further access is pointless, and the per-timeout recovery
+	 * churn (init_hw's warm/HARD PDMA resets, SOFTRESET, clk enable/
+	 * disable cycles, IRQ re-arming) is exactly what ran under the b224
+	 * build when the SoC hard-hung 31 s in, mid-sweep.  Fail fast and
+	 * leave the block alone.
+	 */
+	if (i2c->fifo_block_dead)
+		return -EIO;
 
 	if (i2c->adap.bus_regulator) {
 		ret = regulator_enable(i2c->adap.bus_regulator);
@@ -1321,6 +1624,16 @@ static irqreturn_t mtk_i2c_irq(int irqno, void *dev_id)
 	u16 restart_flag = i2c->auto_restart ? I2C_RS_TRANSFER : 0;
 	u16 intr_stat;
 
+	/*
+	 * Mask everything first, then latch and acknowledge the whole status
+	 * register.  Newer SoCs (mt6833 and friends) report extra conditions
+	 * that this driver does not otherwise handle (I2C_TIMEOUT,
+	 * I2C_DMAERR, I2C_IBI, I2C_BUS_ERR).  They are level-triggered, so
+	 * leaving one of them set keeps the IRQ line asserted forever and
+	 * hangs the system in an interrupt storm instead of just failing
+	 * the transfer.
+	 */
+	mtk_i2c_writew(i2c, ~(I2C_INTR_ALL | restart_flag), OFFSET_INTR_MASK);
 	intr_stat = mtk_i2c_readw(i2c, OFFSET_INTR_STAT);
 	mtk_i2c_writew(i2c, intr_stat, OFFSET_INTR_STAT);
 
@@ -1330,6 +1643,15 @@ static irqreturn_t mtk_i2c_irq(int irqno, void *dev_id)
 	 * i2c->irq_stat need keep the two interrupt value.
 	 */
 	i2c->irq_stat |= intr_stat;
+
+	/*
+	 * The extended error bits are not followed by a completion
+	 * interrupt; end the wait here so the transfer fails right away.
+	 */
+	if (intr_stat & (I2C_TIMEOUT | I2C_DMAERR | I2C_BUS_ERR)) {
+		complete(&i2c->msg_complete);
+		return IRQ_HANDLED;
+	}
 
 	if (i2c->ignore_restart_irq && (i2c->irq_stat & restart_flag)) {
 		i2c->ignore_restart_irq = false;
@@ -1510,6 +1832,7 @@ static int mtk_i2c_probe(struct platform_device *pdev)
 	mtk_i2c_init_hw(i2c);
 	clk_bulk_disable(I2C_MT65XX_CLK_MAX, i2c->clocks);
 
+	i2c->irq = irq; /* b225 */
 	ret = devm_request_irq(&pdev->dev, irq, mtk_i2c_irq,
 			       IRQF_NO_SUSPEND | IRQF_TRIGGER_NONE,
 			       dev_name(&pdev->dev), i2c);

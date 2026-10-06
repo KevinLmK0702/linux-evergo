@@ -514,6 +514,18 @@ static int __mtk_clk_simple_probe(struct platform_device *pdev,
 	num_clks += mcd->num_fixed_clks + mcd->num_factor_clks;
 	num_clks += mcd->num_mux_clks + mcd->num_divider_clks;
 
+	/*
+	 * Gate bindings can be sparse: some providers list far fewer gates
+	 * than the highest binding ID they use (e.g. mt6833 infracfg defines
+	 * 87 gates with IDs running up to 114).  clk_data->hws[] is indexed
+	 * by that binding ID, so the onecell must span the highest ID used
+	 * and not just the number of clocks, otherwise the registration
+	 * writes out of bounds and of_clk_hw_onecell_get() cannot resolve
+	 * the high-ID clocks at all.
+	 */
+	for (int i = 0; i < mcd->num_clks; i++)
+		num_clks = max(num_clks, mcd->clks[i].id + 1);
+
 	clk_data = mtk_alloc_clk_data(num_clks);
 	if (!clk_data) {
 		r = -ENOMEM;

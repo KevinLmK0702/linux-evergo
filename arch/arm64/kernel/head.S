@@ -104,6 +104,13 @@
  * far the kernel got.  The MMU is still off, so these are plain physical
  * stores.  Only x4/x5/x6 are clobbered.
  *
+ * NOTE: when CONFIG_PSTORE_RAM is enabled the window at 0x48090000 belongs
+ * to the pstore/ramoops driver (its persistent_ram header sits at +0), and
+ * these stores would overwrite the previous boot's bookkeeping - every
+ * replay would then show nothing but the EVM tag bytes.  The probe is
+ * compiled out in that configuration; early progress is still readable via
+ * evergo_sram() (SRAM fiq_step) and the EVTICK stamps in the LK ring.
+ *
  * evergo_sram() is the more reliable half of the pair: it stamps the ram
  * console "fiq_step" field in SRAM (0x11d000 + 0x3c), which the MTK LK prints
  * on every single boot ("RAM_CONSOLE. wdt_status 0x?, fiq_step 0x?, ...").
@@ -166,8 +173,10 @@
 	.endm
 
 	.macro	evergo_dbgc, half, idx
+#ifndef CONFIG_PSTORE_RAM
 	movz	x4, #0x0000
-	movk	x4, #0x4809, lsl #16		// x4 = 0x48090000 (pstore window)	movz	w6, #0x4244
+	movk	x4, #0x4809, lsl #16		// x4 = 0x48090000 (pstore window)
+	movz	w6, #0x4244
 	movk	w6, #0x4347, lsl #16		// "DBGC"
 	str	w6, [x4]			// magic
 	str	wzr, [x4, #4]
@@ -176,6 +185,7 @@
 	movz	w5, #0x5645			// 'E','V'
 	movk	w5, #\half, lsl #16		// -> "EVM<n>"
 	str	w5, [x4, #(12 + 4 * \idx)]
+#endif
 	.endm
 
 /*

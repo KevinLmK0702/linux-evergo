@@ -2304,12 +2304,22 @@ static void __composite_disconnect(struct usb_gadget *gadget)
 
 void composite_disconnect(struct usb_gadget *gadget)
 {
+	/* EVERGO bring-up: distinguishes a cable/session loss (.disconnect) from
+	 * a host bus reset (.reset) -- both funnel into __composite_disconnect()
+	 * and therefore both printed "reset config", which is exactly the
+	 * ambiguity that hid this loop for several builds. */
+	static int evergo_n;
+	if (evergo_n++ < 30)
+		pr_info("EVERGO-DIAG composite_disconnect\n");
 	usb_gadget_vbus_draw(gadget, 0);
 	__composite_disconnect(gadget);
 }
 
 void composite_reset(struct usb_gadget *gadget)
 {
+	static int evergo_n;
+	if (evergo_n++ < 30)
+		pr_info("EVERGO-DIAG composite_reset\n");
 	/*
 	 * Section 1.4.13 Standard Downstream Port of the USB battery charging
 	 * specification v1.2 states that a device connected on a SDP shall only

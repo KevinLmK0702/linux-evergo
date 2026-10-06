@@ -12,6 +12,8 @@
 #include <linux/stddef.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
+#include <linux/jiffies.h>
+#include <linux/timer.h>
 #include <linux/initrd.h>
 #include <linux/console.h>
 #include <linux/cache.h>
@@ -33,6 +35,8 @@
 #include <linux/sched/task.h>
 #include <linux/scs.h>
 #include <linux/mm.h>
+#include <linux/io.h>		/* memremap() for the pstore text log */
+#include <linux/slab.h>		/* slab_is_available() gate for it */
 
 #include <asm/acpi.h>
 #include <asm/fixmap.h>
@@ -402,6 +406,55 @@ static void evergo_ring_leave(char *slot, bool mapped)
 }
 
 /*
+ * HBEAT - a heartbeat that does not go through printk.
+ *
+ * The frame ring and plog are both written from the console path, so one CPU
+ * wedged inside a console write (holding the log lock - b189 went silent mid
+ * fbdev commit at 0.65 s and never printed again) takes both channels down at
+ * once, and a read-back cannot tell "the machine died" from "the log died".
+ * This timer writes a plain-text stamp into every ring slot at offset +0x20
+ * (free: EVTICK sits at +0x00, the build stamp at +0x40, the log at +0x100):
+ *
+ *	HBEAT:<uptime seconds>:<seq>:<cpu>
+ *
+ * It runs from a timer softirq, touches no printk lock, and is shipped to
+ * expdb by LK like every other ring stamp, so a read-back always shows the
+ * last moment the scheduler was still running.
+ */
+#define EVERGO_HBEAT_OFF	0x20
+
+static void evergo_hbeat(struct timer_list *t);
+static DEFINE_TIMER(evergo_hbeat_timer, evergo_hbeat);
+static u32 evergo_hbeat_seq;
+
+static void evergo_hbeat(struct timer_list *t)
+{
+	char buf[40];
+	int n, i;
+
+	evergo_hbeat_seq++;
+	n = snprintf(buf, sizeof(buf), "HBEAT:%lu:%u:%u",
+		     (unsigned long)(jiffies_64 / HZ), evergo_hbeat_seq,
+		     raw_smp_processor_id());
+	for (i = 0; i < EVERGO_RING_SLOTS; i++) {
+		char *slot = (char *)__va(EVERGO_RING_BASE + i * EVERGO_RING_SLOT);
+
+		memcpy(slot + EVERGO_HBEAT_OFF, buf, n + 1);
+		dcache_clean_poc((unsigned long)(slot + EVERGO_HBEAT_OFF),
+				 (unsigned long)(slot + EVERGO_HBEAT_OFF) + 48);
+	}
+	mod_timer(&evergo_hbeat_timer, jiffies + 2 * HZ);
+}
+
+static int __init evergo_hbeat_init(void)
+{
+	mod_timer(&evergo_hbeat_timer, jiffies + 2 * HZ);
+	pr_info("evergo: hbeat timer armed\n");
+	return 0;
+}
+late_initcall(evergo_hbeat_init);
+
+/*
  * Progress tick. Stamped into every slot, so whatever LK overwrites later, the
  * highest surviving value in a read-back tells us how far the kernel got.
  */
@@ -443,8 +496,170 @@ static void evergo_log_mirror(unsigned int i)
 }
 
 /* Append text to the frame stream, starting a new frame when one is full. */
+/*
+ * evergo_plog - a plain text log in the unused tail of the pstore region.
+ *
+ * The ring above is LK's own buffer, and every console-based channel shares
+ * one weakness: printk writes to the consoles in order, so a console that
+ * blocks takes the whole log with it.  That is not hypothetical on this board
+ * - uart0 has no working driver by default, but the moment something makes it
+ * probe, "console=ttyS0" in the bootargs puts the 8250 console first and its
+ * first printk busy-waits on a UART_THR that never drains.  A channel that
+ * lives in memory the kernel writes directly cannot be caught by that.
+ *
+ * ramoops lays its zones out from 0x48090000: the console zone takes the
+ * first 0x40000 and pmsg the next 0x10000.  With no record-size the "dmesg"
+ * zone is skipped *without* advancing the cursor - ramoops_init_przs()
+ * returns early for record_size == 0 - so the 0x90000 bytes from +0x50000 to
+ * the end of the 0xe0000 window are never touched by anything (the next
+ * reserved region, minirdump, starts exactly at 0x48170000).
+ *
+ * LK copies that whole window into expdb on its next boot, and mtkclient can
+ * read it straight out of DRAM, so this is also a channel that survives a
+ * board_reset() that never gets as far as LK.
+ *
+ * The region is no-map in the device tree, so it is *not* part of the linear
+ * map and __va() must never be used on it; it is remapped with memremap()
+ * once the vmalloc area exists (slab_is_available() is the gate).
+ *
+ *	+0x00	char[8]	"EVPLOG\0\0"
+ *	+0x08	u32	capacity, bytes of text (EVERGO_PLOG_CAP)
+ *	+0x0c	u32	written, monotonic, wraps at 2^32
+ *	+0x10	u32	wpos, index of the next byte to write
+ *	+0x14	u32	reserved
+ *	+0x18	text ring; the most recent min(written, capacity) bytes end here
+ */
+#define EVERGO_PLOG_BASE	0x48090000UL
+#define EVERGO_PLOG_OFF		0x50000UL	/* past ramoops console + pmsg */
+#define EVERGO_PLOG_SIZE	0x90000UL
+#define EVERGO_PLOG_HDR		0x18
+#define EVERGO_PLOG_CAP		(EVERGO_PLOG_SIZE - EVERGO_PLOG_HDR)
+
+static char *evergo_plog;
+static u32 evergo_plog_written;
+static u32 evergo_plog_wpos;
+
+static void evergo_plog_open(void)
+{
+	u32 *h;
+
+	if (evergo_plog || !slab_is_available())
+		return;
+
+	/*
+	 * The window is no-map, so this is an ioremap under the hood, not a
+	 * linear-map lookup.  WB is what we want (it is ordinary DRAM that LK
+	 * copies out verbatim), but a no-map region is not always granted a
+	 * cacheable mapping, so fall back to WC and say which one won: if both
+	 * fail the next read-back must still tell us that, instead of looking
+	 * exactly like a kernel that died before printk came up.
+	 */
+	evergo_plog = memremap(EVERGO_PLOG_BASE + EVERGO_PLOG_OFF,
+			       EVERGO_PLOG_SIZE, MEMREMAP_WB);
+	if (!evergo_plog)
+		evergo_plog = memremap(EVERGO_PLOG_BASE + EVERGO_PLOG_OFF,
+				       EVERGO_PLOG_SIZE, MEMREMAP_WC);
+	if (!evergo_plog) {
+		pr_warn("evergo: plog %#lx not mappable, ring only\n",
+			EVERGO_PLOG_BASE + EVERGO_PLOG_OFF);
+		return;
+	}
+
+	h = (u32 *)evergo_plog;
+	if (memcmp(evergo_plog, "EVPLOG", 6)) {
+		/* Cold boot: start a fresh one. */
+		memset(evergo_plog, 0, EVERGO_PLOG_HDR);
+		memcpy(evergo_plog, "EVPLOG", 6);
+		h[2] = EVERGO_PLOG_CAP;
+		evergo_plog_written = 0;
+		evergo_plog_wpos = 0;
+	} else {
+		/* Warm reset: carry on where the previous life stopped. */
+		evergo_plog_written = h[3];
+		evergo_plog_wpos = h[4] % EVERGO_PLOG_CAP;
+	}
+	dcache_clean_poc((unsigned long)h, (unsigned long)(h + 6));
+	pr_info("evergo: plog ready at %#lx, %lu bytes, carried %u\n",
+		(unsigned long)(EVERGO_PLOG_BASE + EVERGO_PLOG_OFF),
+		EVERGO_PLOG_SIZE, evergo_plog_written);
+}
+
+/*
+ * The arming above happens inside setup_arch(), long before any of our log
+ * channels exist, so that pr_info() is dropped.  Say it again once the ring
+ * console is up (and reload once more, so the full window starts here): a
+ * read-back then shows both that the arming took and what the hardware really
+ * has, instead of us inferring it from where the log happens to stop.
+ */
+static void evergo_wdt_report(void)
+{
+	void __iomem *wdt = ioremap(0x10007000, 0x1000);
+	u32 mode, len;
+
+	if (!wdt) {
+		pr_warn("evergo: wdt window not mappable\n");
+		return;
+	}
+	writel(0x1971, wdt + 0x08);	/* WDT_RST: full window from here */
+	mode = readl(wdt);
+	len = readl(wdt + 0x04);
+	iounmap(wdt);
+	pr_info("evergo: wdt mode %#x len %#x -> %u s, pretimeout %u/64 s\n",
+		mode, len, (len >> 11) & 0x1f, (len >> 6) & 0x1f);
+}
+
+/*
+ * Opened from initcalls, never lazily from the write path: printk runs with
+ * interrupts disabled often enough, and memremap() allocates, so mapping
+ * there would sleep in atomic context.  Registered twice on purpose - the
+ * second call is a no-op if the first one managed to map, and a retry if the
+ * vmalloc area was not ready that early.
+ */
+static int __init evergo_plog_initcall(void)
+{
+	evergo_plog_open();
+	if (evergo_plog)
+		evergo_wdt_report();
+	return 0;
+}
+early_initcall(evergo_plog_initcall);
+subsys_initcall(evergo_plog_initcall);
+
+static void evergo_plog_put(const char *s, size_t n)
+{
+	if (!evergo_plog)
+		return;
+
+	while (n) {
+		size_t room = EVERGO_PLOG_CAP - evergo_plog_wpos;
+		char *dst;
+
+		if (room > n)
+			room = n;
+		dst = evergo_plog + EVERGO_PLOG_HDR + evergo_plog_wpos;
+		memcpy(dst, s, room);
+		dcache_clean_poc((unsigned long)dst, (unsigned long)dst + room);
+		evergo_plog_wpos = (evergo_plog_wpos + room) % EVERGO_PLOG_CAP;
+		evergo_plog_written += room;
+		s += room;
+		n -= room;
+	}
+
+	((u32 *)evergo_plog)[3] = evergo_plog_written;
+	((u32 *)evergo_plog)[4] = evergo_plog_wpos;
+	dcache_clean_poc((unsigned long)evergo_plog,
+			 (unsigned long)evergo_plog + EVERGO_PLOG_HDR);
+}
+
+/* Append text to the frame stream, starting a new frame when one is full. */
 static void evergo_log_put(const char *s, size_t n)
 {
+	/*
+	 * Mirror everything into the pstore text log as well.  Same text, same
+	 * order, but a channel nothing else can take away.
+	 */
+	evergo_plog_put(s, n);
+
 	while (n) {
 		bool mapped;
 		char *f;
@@ -592,6 +807,17 @@ static void evergo_sram_step(u32 step)
 		return;
 	}
 
+	/*
+	 * Between the end of the early fixmap (paging_init() tears the fixmap
+	 * down) and the point where the slab allocator exists there is no way
+	 * to reach SRAM at all: early_memremap() is gone and
+	 * generic_ioremap_prot() only warns ("WARNING: mm/ioremap.c:23") and
+	 * returns NULL before the slab is up.  Drop the mark instead of
+	 * triggering that warning.
+	 */
+	if (!slab_is_available())
+		return;
+
 	if (!evergo_sram_io)
 		evergo_sram_io = ioremap(EVERGO_SRAM_BASE, 0x1000);
 	if (!evergo_sram_io)
@@ -631,7 +857,20 @@ static u32 evergo_off = 12;	/* past the persistent_ram_buffer header */
 
 void __init evergo_zone_map(void)
 {
+#ifdef CONFIG_PSTORE_RAM
+	/*
+	 * pstore/ramoops is enabled: the first 0x50000 bytes of the window are
+	 * the ramoops zones and the persistent_ram header at 0x48090000 belongs
+	 * to the driver.  Writing breadcrumbs into it would clobber the previous
+	 * boot's bookkeeping and turn every replay into the breadcrumb text.
+	 * The other early channels (SRAM fiq_step, the EVTICK stamps in the LK
+	 * ring and, later, plog) still carry the boot progress; only the fake
+	 * DBGC record here is skipped.
+	 */
+	return;
+#else
 	evergo_zone = early_memremap(EVERGO_ZONE_BASE, 0x1000);
+#endif
 }
 
 void evergo_zone_close(void)
@@ -734,12 +973,39 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 			u32 mode = readl(wdt);		/* WDT_MODE */
 			u32 len = readl(wdt + 0x04);	/* WDT_LENGTH */
 
-			writel((len & 0x3f) | (31 << 5) | 0x8, wdt + 0x04);
+			/*
+			 * Field layout (drivers/watchdog/mtk_wdt.c): seconds in
+			 * bits[15:11], pretimeout in bits[10:6], key 0x8 in
+			 * bits[3:0].  The driver writes
+			 *
+			 *   WDT_LENGTH_TIMEOUT((timeout - pretimeout) << 6)
+			 *                          -- and WDT_LENGTH_TIMEOUT(n) is
+			 *                          n << 5 --
+			 *
+			 * i.e. the seconds field really does live at bit 11.
+			 * "31 << 5" would only poke the pretimeout field and leave
+			 * the preloader's short timeout in place, which is exactly
+			 * what kept resetting the board at ~0.31 s: the reset landed
+			 * inside a different core_initcall on every build, but always
+			 * at the same wall-clock time, and LK reported
+			 * "wdt_status 0x1 / detect abnormal boot" afterwards.
+			 */
+			/*
+			 * The encoding is ambiguous in this tree: the driver computes
+			 * ((timeout - pretimeout) << 6) << 5, i.e. seconds in
+			 * bits[15:11], but the preloader's own value reads back as
+			 * 0x3e0 = 31 << 5, as if the seconds field were bits[9:5].
+			 * Set both fields so the timeout is 31 s under either
+			 * reading; bits[10:6] then hold a pretimeout, which the mode
+			 * write below disables anyway (no IRQ_EN, no DUAL_EN).
+			 */
+			writel((31 << 11) | (31 << 5) | 0x8, wdt + 0x04);
 			writel((mode & ~((1 << 3) | (1 << 6))) | (1 << 0) | (1 << 2) |
 			       0x22000000, wdt);	/* EN|EXRST_EN|key */
 			writel(0x1971, wdt + 0x08);	/* WDT_RST reload */
-			pr_info("evergo: wdt mode %#x -> %#x len %#x (armed 31s)\n",
-				mode, readl(wdt), readl(wdt + 0x04));
+			pr_info("evergo: wdt mode %#x -> %#x len %#x -> %#x (%u s)\n",
+				mode, readl(wdt), len, readl(wdt + 0x04),
+				(readl(wdt + 0x04) >> 11) & 0x1f);
 			early_iounmap(wdt, 0x1000);
 		} else {
 			pr_warn("evergo: could not map the reset generator\n");

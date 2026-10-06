@@ -535,7 +535,15 @@
 		 * 0x11f00000, clock gate inside the I-N wrap, SPI 118 level high).
 		 */
 		i2c6: i2c@11f00000 {
-			compatible = "mediatek,mt6833-i2c", "mediatek,mt8183-i2c";
+			/*
+			 * The vendor driver describes this IP as register set "ver 2"
+			 * with "dma_ver 1": the mt8183-generation v2 offsets
+			 * (CLOCK_DIV 0x48, FIFO_STAT 0xf4, DEBUGSTAT 0xe4, HS 0x30,
+			 * IO_CONFIG 0x34) plus the DMA handshake (CONTROL
+			 * DMAACK_EN|ASYNC_MODE, PDMA CON SKIP_CONFIG|ASYNC_MODE).
+			 * The dedicated mt6833 entry carries exactly that.
+			 */
+			compatible = "mediatek,mt6833-i2c";
 			reg = <0 0x11f00000 0 0x1000>,
 			      <0 0x10217580 0 0x80>;
 			interrupts = <GIC_SPI 118 IRQ_TYPE_LEVEL_HIGH>;

@@ -1055,6 +1055,42 @@ static int do_inquiry(struct fsg_common *common, struct fsg_buffhd *bh)
 	struct fsg_lun *curlun = common->curlun;
 	u8	*buf = (u8 *) bh->buf;
 
+	/*
+	 * EVERGO bring-up: VPD pages.  Windows wants page 0x80 before it will
+	 * accept a disk; answering with ILLEGAL REQUEST made it reset the port.
+	 * The serial is a fixed string on purpose -- this gadget is a log
+	 * carrier, not a product, and a stable value is what the host caches.
+	 */
+	static const char evergo_serial[] = "EVERGO0000000001";
+
+	if (common->cmnd[1] & 1) {	/* EVPD */
+		u8 page = common->cmnd[2];
+		u32 len;
+
+		memset(buf, 0, 36);
+		buf[1] = page;
+
+		if (page == 0x00) {	/* supported VPD pages */
+			buf[3] = 2;	/* page length */
+			buf[4] = 0x00;
+			buf[5] = 0x80;
+			len = 6;
+		} else if (page == 0x80) {	/* unit serial number */
+			len = sizeof(evergo_serial) - 1;
+			buf[3] = len;
+			memcpy(buf + 4, evergo_serial, len);
+			len += 4;
+		} else {
+			if (curlun)
+				curlun->sense_data = SS_INVALID_FIELD_IN_CDB;
+			return -EINVAL;
+		}
+
+		if (len > common->data_size_from_cmnd)
+			len = common->data_size_from_cmnd;
+		return len;
+	}
+
 	if (!curlun) {		/* Unsupported LUNs are okay */
 		common->bad_lun_okay = 1;
 		memset(buf, 0, 36);
@@ -1153,6 +1189,21 @@ static int do_read_capacity(struct fsg_common *common, struct fsg_buffhd *bh)
 		max_lba = 0xffffffff;
 	put_unaligned_be32(max_lba, &buf[0]);		/* Max logical block */
 	put_unaligned_be32(curlun->blksize, &buf[4]);	/* Block length */
+	{
+		/*
+		 * EVERGO bring-up: the host resets the port right after this
+		 * data phase without ever collecting the CSW, and it reports the
+		 * volume as having no capacity.  Both are what a host does when
+		 * the capacity it just read is unusable, so print what we hand
+		 * it.  Capped so it cannot flood the LK log ring.
+		 */
+		static int evergo_n;
+		if (evergo_n++ < 40)
+			pr_info("EVERGO-DIAG read_capacity -> max_lba=%u blksize=%u num_sectors=%llu ro=%d removable=%d\n",
+				max_lba, curlun->blksize,
+				(unsigned long long)curlun->num_sectors,
+				curlun->ro, curlun->removable);
+	}
 	return 8;
 }
 
@@ -1689,6 +1740,17 @@ static void send_status(struct fsg_common *common)
 		sd = SS_INVALID_COMMAND;
 	} else if (sd != SS_NO_SENSE) {
 		DBG(common, "sending command-failure status\n");
+		{
+			/* EVERGO bring-up: VDBG below needs VERBOSE_DEBUG, which
+			 * is off, so the sense key was never visible.  It is the
+			 * one thing that says whether a failing command is the
+			 * benign unit attention or a real error. */
+			static int evergo_n;
+			if (evergo_n++ < 60)
+				pr_info("EVERGO-DIAG fail: cmd=%02x SK=%02x ASC=%02x ASCQ=%02x info=%x lun=%u\n",
+					common->cmnd[0], SK(sd), ASC(sd), ASCQ(sd),
+					sdinfo, common->lun);
+		}
 		status = US_BULK_STAT_FAIL;
 		VDBG(common, "  sense data: SK x%02x, ASC x%02x, ASCQ x%02x;"
 				"  info x%x\n",
@@ -1875,6 +1937,17 @@ static int do_scsi_command(struct fsg_common *common)
 	static char		unknown[16];
 
 	dump_cdb(common);
+	{
+		/* EVERGO bring-up: dump_cdb() is a DEBUG-only no-op, so the
+		 * command stream from the host was invisible.  This is the
+		 * only way to tell a stuck READ(10) from a failed INQUIRY. */
+		static int evergo_n;
+		if (evergo_n++ < 120)
+			pr_info("EVERGO-DIAG scsi: op=%02x cdb=%02x %02x %02x %02x %02x lun=%u cmndsz=%u\n",
+				common->cmnd[0], common->cmnd[1], common->cmnd[2],
+				common->cmnd[3], common->cmnd[4], common->cmnd[5],
+				common->lun, common->cmnd_size);
+	}
 
 	/* Wait for the next buffer to become available for data or status */
 	bh = common->next_buffhd_to_fill;
@@ -1891,8 +1964,17 @@ static int do_scsi_command(struct fsg_common *common)
 
 	case INQUIRY:
 		common->data_size_from_cmnd = common->cmnd[4];
+		/*
+		 * EVERGO bring-up: allow the EVPD bit (cmnd[1]) and the page code
+		 * (cmnd[2]).  Upstream masks them off, so every *VPD* INQUIRY became
+		 * INVALID FIELD IN CDB -- and Windows asks for VPD page 0x80 (unit
+		 * serial number) as part of identifying a disk.  It treats that
+		 * failure as a broken device: the trace shows one INQUIRY(VPD 0x80),
+		 * one failed CSW, and a bus reset 4 ms later, over and over, which is
+		 * what kept the port cycling and the volume unreadable.
+		 */
 		reply = check_command(common, 6, DATA_DIR_TO_HOST,
-				      (1<<4), 0,
+				      (1<<1) | (1<<2) | (1<<4), 0,
 				      "INQUIRY");
 		if (reply == 0)
 			reply = do_inquiry(common, bh);

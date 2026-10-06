@@ -2063,6 +2063,16 @@ __acquires(musb->lock)
 	u8		devctl = musb_readb(mbase, MUSB_DEVCTL);
 	u8		power;
 
+	{
+		/* EVERGO bring-up: this is the bus-reset entry point.  It must be a
+		 * dev_info because musb_dbg() only emits a tracepoint, which is why
+		 * 128-245 port resets per boot were invisible in the log. */
+		static int evergo_n;
+		if (evergo_n++ < 30)
+			dev_info(musb->controller,
+				 "EVERGO-DIAG musb_g_reset: devctl %02x\n", devctl);
+	}
+
 	musb_dbg(musb, "<== %s driver '%s'",
 			(devctl & MUSB_DEVCTL_BDEVICE)
 				? "B-Device" : "A-Device",

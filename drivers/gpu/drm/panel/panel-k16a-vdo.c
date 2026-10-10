@@ -212,8 +212,11 @@ static int k16a_prepare(struct drm_panel *panel)
 	struct k16a *ctx = to_k16a(panel);
 	int ret;
 
-	if (ctx->prepared)
+	dev_info(ctx->dev, "k16a: prepare (in)\n");
+	if (ctx->prepared) {
+		dev_info(ctx->dev, "k16a: prepare (already prepared)\n");
 		return 0;
+	}
 
 	if (ctx->dvdd) {
 		ret = regulator_set_voltage(ctx->dvdd, K16A_LCD_DVDD_UV,
@@ -253,6 +256,7 @@ static int k16a_prepare(struct drm_panel *panel)
 	K16A_DCS(ctx, MIPI_DCS_SET_DISPLAY_ON);
 
 	ctx->prepared = true;
+	dev_info(ctx->dev, "k16a: prepare (out)\n");
 
 	return 0;
 }
@@ -261,8 +265,11 @@ static int k16a_unprepare(struct drm_panel *panel)
 {
 	struct k16a *ctx = to_k16a(panel);
 
-	if (!ctx->prepared)
+	dev_info(ctx->dev, "k16a: unprepare (in)\n");
+	if (!ctx->prepared) {
+		dev_info(ctx->dev, "k16a: unprepare (not prepared)\n");
 		return 0;
+	}
 
 	K16A_DCS(ctx, MIPI_DCS_SET_DISPLAY_OFF);
 	usleep_range(20000, 20001);
@@ -284,6 +291,7 @@ static int k16a_unprepare(struct drm_panel *panel)
 		regulator_disable(ctx->dvdd);
 
 	ctx->prepared = false;
+	dev_info(ctx->dev, "k16a: unprepare (out)\n");
 
 	return 0;
 }
@@ -291,7 +299,9 @@ static int k16a_unprepare(struct drm_panel *panel)
 static int k16a_enable(struct drm_panel *panel)
 {
 	struct k16a *ctx = to_k16a(panel);
+	int ret;
 
+	dev_info(ctx->dev, "k16a: enable (in)\n");
 	if (!ctx->backlight)
 		return 0;
 
@@ -299,17 +309,23 @@ static int k16a_enable(struct drm_panel *panel)
 	if (!ctx->backlight->props.brightness)
 		ctx->backlight->props.brightness = K16A_DEFAULT_BRIGHTNESS;
 
-	return backlight_enable(ctx->backlight);
+	ret = backlight_enable(ctx->backlight);
+	dev_info(ctx->dev, "k16a: enable (out) ret=%d\n", ret);
+	return ret;
 }
 
 static int k16a_disable(struct drm_panel *panel)
 {
 	struct k16a *ctx = to_k16a(panel);
+	int ret;
 
+	dev_info(ctx->dev, "k16a: disable (in)\n");
 	if (!ctx->backlight)
 		return 0;
 
-	return backlight_disable(ctx->backlight);
+	ret = backlight_disable(ctx->backlight);
+	dev_info(ctx->dev, "k16a: disable (out) ret=%d\n", ret);
+	return ret;
 }
 
 static int k16a_get_modes(struct drm_panel *panel,
@@ -359,8 +375,8 @@ static int k16a_probe(struct mipi_dsi_device *dsi)
 	ctx->desc = of_device_get_match_data(dev);
 
 	/*
-	 * b223: request every control pin AS-IS.  The probe used to force
-	 * values (reset high, pm-enable high, bias low) and b222 showed the
+	 * request every control pin AS-IS.  The probe used to force
+	 * values (reset high, pm-enable high, bias low); early testing showed the
 	 * result: the LM36273 answered i2c at 0.37 s and was already wedged
 	 * by scan time, with this probe (0.62 s) the only actor in between --
 	 * yanking the bias switches (137/138) low while the chip's outputs
@@ -380,10 +396,10 @@ static int k16a_probe(struct mipi_dsi_device *dsi)
 				     "failed to get pm-enable gpio\n");
 
 	/*
-	 * NOTE (b221/b223): this pin also enables the LM36273 backlight/bias
+	 * NOTE: this pin also enables the LM36273 backlight/bias
 	 * chip on the same flex ("lcm-bl-enable" in the vendor tree).  It
-	 * MUST be high: b220 showed that probing with GPIOD_OUT_LOW
-	 * silently disabled the chip seconds after boot.  Since b223 it is
+	 * MUST be high: probing with GPIOD_OUT_LOW
+	 * silently disabled the chip seconds after boot.  Since then it is
 	 * requested AS-IS (our lm36273 pinctrl state already drove it high
 	 * at 0.37 s); the probe must not change any of these pins, only
 	 * prepare()/unprepare() drive values, as in the vendor driver.

@@ -99,6 +99,7 @@ static void mtk_crtc_finish_page_flip(struct mtk_crtc *mtk_crtc)
 	unsigned long flags;
 
 	if (mtk_crtc->event) {
+		dev_info(crtc->dev->dev, "evergo: flip done\n");
 		spin_lock_irqsave(&crtc->dev->event_lock, flags);
 		drm_crtc_send_vblank_event(crtc, mtk_crtc->event);
 		drm_crtc_vblank_put(crtc);
@@ -284,6 +285,9 @@ static void ddp_cmdq_cb(struct mbox_client *cl, void *mssg)
 	struct mtk_crtc_state *state;
 	unsigned int i;
 	unsigned long flags;
+
+	dev_info(mtk_crtc->base.dev->dev, "evergo: cmdq cb sta=%d\n",
+		 data->sta);
 
 	/* release GCE HW usage and start autosuspend */
 	pm_runtime_mark_last_busy(cmdq_cl->chan->mbox->dev);
@@ -1128,8 +1132,8 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
 	mtk_crtc->cmdq_client.chan =
 			mbox_request_channel(&mtk_crtc->cmdq_client.client, i);
 	if (IS_ERR(mtk_crtc->cmdq_client.chan)) {
-		dev_dbg(dev, "mtk_crtc %d failed to create mailbox client, writing register by CPU now\n",
-			drm_crtc_index(&mtk_crtc->base));
+			dev_err(dev, "mtk_crtc %d: no cmdq channel, writing registers by CPU now\n",
+				drm_crtc_index(&mtk_crtc->base));
 		mtk_crtc->cmdq_client.chan = NULL;
 	}
 
@@ -1139,7 +1143,7 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
 						 i,
 						 &mtk_crtc->cmdq_event);
 		if (ret) {
-			dev_dbg(dev, "mtk_crtc %d failed to get mediatek,gce-events property\n",
+			dev_err(dev, "mtk_crtc %d: no mediatek,gce-events (missing in disp-mutex), CPU writes\n",
 				drm_crtc_index(&mtk_crtc->base));
 			mbox_free_channel(mtk_crtc->cmdq_client.chan);
 			mtk_crtc->cmdq_client.chan = NULL;

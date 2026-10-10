@@ -109,6 +109,12 @@ static int mtk_mipi_tx_pll_cphy_enable(struct clk_hw *hw)
 	mtk_phy_set_bits(base + MIPITX_PLL_CON1, RG_DSI_PLL_EN);
 	udelay(100);
 
+	dev_info(mipi_tx->dev,
+		 "evergo: cphy pll on: rate=%u txdiv=%u pcw=%08x con0=%08x con1=%08x pwr=%08x lane=%08x\n",
+		 rate, txdiv, (u32)pcw, readl(base + MIPITX_PLL_CON0),
+		 readl(base + MIPITX_PLL_CON1), readl(base + MIPITX_PLL_PWR),
+		 readl(base + MIPITX_LANE_CON));
+
 	return 0;
 }
 
@@ -157,6 +163,11 @@ static void mtk_mipi_tx_cphy_enable_signal(struct phy *phy)
 	writel(0x24210987, base + MIPITX_PHY_SEL1);
 	writel(0x68543102, base + MIPITX_PHY_SEL2);
 	writel(0x00000007, base + MIPITX_PHY_SEL3);
+
+	dev_info(mipi_tx->dev,
+		 "evergo: cphy lanes: sel0=%08x sel1=%08x sel2=%08x sel3=%08x\n",
+		 readl(base + MIPITX_PHY_SEL0), readl(base + MIPITX_PHY_SEL1),
+		 readl(base + MIPITX_PHY_SEL2), readl(base + MIPITX_PHY_SEL3));
 }
 
 static void mtk_mipi_tx_cphy_disable_signal(struct phy *phy)

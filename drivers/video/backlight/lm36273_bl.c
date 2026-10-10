@@ -16,6 +16,7 @@
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
+#include <linux/regulator/consumer.h>
 
 /* register map, from the vendor's lcm_cust_common.h */
 #define LM36273_DISP_BC1	0x02
@@ -32,6 +33,7 @@
 struct lm36273 {
 	struct i2c_client *client;
 	struct backlight_device *bl;
+	struct regulator *vdd;	/* panel/chip DVDD rail (MT6359 VCN13) */
 	struct mutex lock;	/* serialises register access */
 	bool bias_on;
 	bool bl_on;
@@ -139,6 +141,7 @@ static int lm36273_probe(struct i2c_client *client)
 		.max_brightness = LM36273_MAX_BRIGHTNESS,
 	};
 	struct lm36273 *lm;
+	int ret;
 
 	lm = devm_kzalloc(&client->dev, sizeof(*lm), GFP_KERNEL);
 	if (!lm)
@@ -146,6 +149,59 @@ static int lm36273_probe(struct i2c_client *client)
 
 	lm->client = client;
 	mutex_init(&lm->lock);
+
+	/*
+	 * Bring-up (b218): the LM36273 (and the panel) sits on the PMIC
+	 * VCN13 rail (1.3 V).  Nothing else enables it on the mainline
+	 * side -- the vendor's panel driver turns it on in
+	 * lcd_enable_dvdd() before its first I2C access, and b217 showed
+	 * that the chip does not ACK at all while the rail is off (full
+	 * 0x08..0x77 sweep, every address NACK).
+	 */
+	lm->vdd = devm_regulator_get_optional(&client->dev, "vdd");
+	if (IS_ERR(lm->vdd)) {
+		if (PTR_ERR(lm->vdd) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		dev_info(&client->dev, "no vdd supply (%pe)\n", lm->vdd);
+		lm->vdd = NULL;
+	} else {
+		ret = regulator_set_voltage(lm->vdd, 1300000, 1300000);
+		if (ret)
+			dev_err(&client->dev, "vdd set voltage: %d\n", ret);
+		ret = regulator_enable(lm->vdd);
+		if (ret)
+			dev_err(&client->dev, "vdd enable: %d\n", ret);
+		else
+			dev_info(&client->dev,
+				 "vdd (VCN13 1.3V) enabled\n");
+	}
+
+	/*
+	 * "lcm-bl-enable" (GPIO87) is driven high by the pinctrl "default"
+	 * state of this node (vendor order: VCN13 first, then the pin).  A
+	 * consumer gpio is not used: on this tree gpiod lookups never
+	 * resolve (b219: probe deferred forever on "enable gpio").
+	 */
+	msleep(2);
+
+	/*
+	 * One-shot bring-up sanity read: makes the log show whether the
+	 * chip answers on the bus at all (register 0x03 = DISP_BC2).
+	 */
+	ret = i2c_smbus_read_byte_data(client, 0x03);
+	if (ret < 0)
+		dev_info(&client->dev, "bring-up: chip did not answer (%d)\n",
+			 ret);
+	else
+		dev_info(&client->dev,
+			 "bring-up: chip answers, reg03=0x%02x\n", ret);
+
+	/*
+	 * b227: the re-check probe has moved out of the kernel -- a forked
+	 * sampler in init owns the death timeline now (the b225/b226
+	 * workqueue recheck ran with 0.5 s+ of jitter and collided with the
+	 * key-triggered scans).  Only this one-shot sanity read stays.
+	 */
 
 	lm->bl = devm_backlight_device_register(&client->dev, "lcd-backlight",
 						&client->dev, lm,

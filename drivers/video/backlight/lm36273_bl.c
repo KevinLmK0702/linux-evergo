@@ -151,10 +151,10 @@ static int lm36273_probe(struct i2c_client *client)
 	mutex_init(&lm->lock);
 
 	/*
-	 * Bring-up (b218): the LM36273 (and the panel) sits on the PMIC
+	 * Bring-up note: the LM36273 (and the panel) sits on the PMIC
 	 * VCN13 rail (1.3 V).  Nothing else enables it on the mainline
 	 * side -- the vendor's panel driver turns it on in
-	 * lcd_enable_dvdd() before its first I2C access, and b217 showed
+	 * lcd_enable_dvdd() before its first I2C access, and early testing showed
 	 * that the chip does not ACK at all while the rail is off (full
 	 * 0x08..0x77 sweep, every address NACK).
 	 */
@@ -180,7 +180,7 @@ static int lm36273_probe(struct i2c_client *client)
 	 * "lcm-bl-enable" (GPIO87) is driven high by the pinctrl "default"
 	 * state of this node (vendor order: VCN13 first, then the pin).  A
 	 * consumer gpio is not used: on this tree gpiod lookups never
-	 * resolve (b219: probe deferred forever on "enable gpio").
+	 * resolve (probe deferred forever on "enable gpio").
 	 */
 	msleep(2);
 
@@ -197,8 +197,8 @@ static int lm36273_probe(struct i2c_client *client)
 			 "bring-up: chip answers, reg03=0x%02x\n", ret);
 
 	/*
-	 * b227: the re-check probe has moved out of the kernel -- a forked
-	 * sampler in init owns the death timeline now (the b225/b226
+	 * the re-check probe has moved out of the kernel -- a forked
+	 * sampler in init owns the death timeline now (the earlier
 	 * workqueue recheck ran with 0.5 s+ of jitter and collided with the
 	 * key-triggered scans).  Only this one-shot sanity read stays.
 	 */
@@ -211,6 +211,30 @@ static int lm36273_probe(struct i2c_client *client)
 				     "failed to register backlight\n");
 
 	i2c_set_clientdata(client, lm);
+
+	/*
+	 * light it up without waiting for the DRM panel -- the display
+	 * pipeline is not wired up yet, but a lit backlight proves both the
+	 * LM36273 and the i2c6 chains end to end.  update_status() runs the
+	 * vendor sequence: BC1/BC2 config, VPOS/VNEG +-5.5V, bias enable,
+	 * brightness, BL_ENABLE.
+	 */
+	lm->bl->props.brightness = 128;
+	backlight_update_status(lm->bl);
+	dev_info(&client->dev, "bring-up: backlight on (brightness 128)\n");
+
+	/* readback, so the log shows what the chip accepted */
+	{
+		int r2 = i2c_smbus_read_byte_data(client, LM36273_DISP_BC1);
+		int r8 = i2c_smbus_read_byte_data(client, LM36273_DISP_BL_ENABLE);
+		int r9 = i2c_smbus_read_byte_data(client, LM36273_DISP_BIAS_CONF1);
+		int r4 = i2c_smbus_read_byte_data(client, LM36273_DISP_BB_LSB);
+		int r5 = i2c_smbus_read_byte_data(client, LM36273_DISP_BB_MSB);
+
+		dev_info(&client->dev,
+			 "bring-up: readback BC1=%d BL_EN=%d CONF1=%d BB=%d/%d\n",
+			 r2, r8, r9, r4, r5);
+	}
 
 	return 0;
 }

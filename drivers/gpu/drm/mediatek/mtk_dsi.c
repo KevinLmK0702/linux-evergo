@@ -222,6 +222,8 @@ struct mtk_dsi {
 	int refcount;
 	bool enabled;
 	bool lanes_ready;
+	/* panel init keeps the block in command mode until enable */
+	bool cmd_window;
 	/* C-PHY (trio) mode, and the cycle counts its blanking needs */
 	bool cphy;
 	u32 hs_trail;
@@ -756,7 +758,7 @@ static s32 mtk_dsi_wait_for_irq_done(struct mtk_dsi *dsi, u32 irq_flag,
 	 * evergo debug: clear every event flag before waiting, so a timeout
 	 * dump below prints provably FRESH bits (arrived during this wait).
 	 * INTSTA is write-ZERO-to-clear: 0x80000000 writes 0 to bits 0-30
-	 * (clear) and 1 to BUSY (bit 31, no-op).  The b195 version wrote
+	 * (clear) and 1 to BUSY (bit 31, no-op).  An earlier version wrote
 	 * 0x7fffffff - the exact inverse - and cleared nothing.
 	 */
 	entry_sta = readl(dsi->regs + DSI_INTSTA);
@@ -960,6 +962,14 @@ static void mtk_output_dsi_enable(struct mtk_dsi *dsi)
 
 	mtk_dsi_set_mode(dsi);
 	mtk_dsi_start(dsi);
+
+	dev_info(dsi->dev,
+		 "evergo: output enabled mode=%08x start=%08x intsta=%08x inten=%08x cmdwin=%d\n",
+		 readl(dsi->regs + DSI_MODE_CTRL),
+		 readl(dsi->regs + DSI_START),
+		 readl(dsi->regs + DSI_INTSTA),
+		 readl(dsi->regs + DSI_INTEN),
+		 dsi->cmd_window);
 
 	dsi->enabled = true;
 }
@@ -1319,9 +1329,19 @@ static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
 	dsi_mode = readl(dsi->regs + DSI_MODE_CTRL);
 	if (dsi_mode & MODE) {
 		mtk_dsi_stop(dsi);
-		ret = mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
-		if (ret)
-			goto restore_dsi_mode;
+		ret = mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 100);
+		if (ret) {
+			/*
+			 * non-fatal.  The switch already put the block
+			 * in command mode; VM_DONE only marks that the last
+			 * video frame finished.  On the very first transfer
+			 * the block sits in video mode from the bootloader
+			 * without running, so VM_DONE never arrives --
+			 * aborting here used to eat the first panel init
+			 * command (0xff) and burn 500 ms.
+			 */
+			drm_warn(drm, "evergo: VM_DONE timeout, continuing in cmd mode\n");
+		}
 	}
 
 	if (MTK_DSI_HOST_IS_READ(msg->type))
@@ -1368,8 +1388,25 @@ static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
 
 restore_dsi_mode:
 	if (dsi_mode & MODE) {
-		mtk_dsi_set_mode(dsi);
-		mtk_dsi_start(dsi);
+		/*
+		 * while the panel is still being initialised (output not
+		 * enabled yet) leave the block in command mode instead of
+		 * flipping back to video.  The old code restarted the video
+		 * stream after every single panel command: every command burned
+		 * a VM_DONE wait, and some commands (0x35 0x82 in the k16a
+		 * table) then never produced CMD_DONE at all -- the engine
+		 * stayed silent for the full 2 s timeout and was recovered only
+		 * by the reset in the timeout path.  The single video switch
+		 * now happens in mtk_output_dsi_enable() once the panel is
+		 * ready, exactly like the vendor driver leaves the block in
+		 * command mode for the whole init sequence.
+		 */
+		if (!dsi->enabled)
+			dsi->cmd_window = true;
+		else {
+			mtk_dsi_set_mode(dsi);
+			mtk_dsi_start(dsi);
+		}
 	}
 
 	return ret < 0 ? ret : recv_cnt;
@@ -1397,7 +1434,7 @@ static struct delayed_work evergo_selftest_work;
 static int evergo_selftest_tries;
 
 /*
- * b200: the real-modeset test owns the block, so the diagnostics stay off.
+ * the real-modeset test owns the block, so the diagnostics stay off.
  * Both works power the DSI up themselves (refcount, mode switches), which
  * would defeat the real enable path: with refcount already 1, the bridge's
  * mtk_dsi_poweron() is a no-op and the VDO timing/PS setup for the real
@@ -1430,7 +1467,7 @@ static void evergo_dsi_selftest(struct work_struct *work)
 		 evergo_dsi_irq_count, evergo_dsi_irq_hit);
 
 	/*
-	 * b195 ran this without the power state a real transfer has (clocks
+	 * an early run did this without the power state a real transfer has (clocks
 	 * and PHY were never raised) and the engine sat BUSY from the LK
 	 * handover on.  Put a plausible pixelclock in place and power the
 	 * block up like a modeset would, then try the command again.
@@ -1544,6 +1581,8 @@ static int mtk_dsi_probe(struct platform_device *pdev)
 	if (IS_ERR(dsi))
 		return PTR_ERR(dsi);
 
+	/* never initialised before; IRQ/poweron debug prints need it */
+	dsi->dev = dev;
 	dsi->driver_data = of_device_get_match_data(dev);
 
 	/*
@@ -1595,24 +1634,33 @@ static int mtk_dsi_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, dsi);
 
+	/*
+	 * request the IRQ BEFORE mipi_dsi_host_register().
+	 *
+	 * mipi_dsi_host_register() creates the panel device and probes it
+	 * synchronously; the panel's mipi_dsi_attach() adds our component,
+	 * which can make the component master bind right there -- and the
+	 * master bind ends in the first fbdev modeset.  Panel prepare() then
+	 * issues its DCS init sequence, whose transfers wait on
+	 * irq_wait_queue (woken only by mtk_dsi_irq()).  With the old order
+	 * the handler was not registered yet and every DCS command timed out.
+	 */
+	ret = devm_request_irq(&pdev->dev, irq_num, mtk_dsi_irq,
+			       IRQF_TRIGGER_NONE, dev_name(&pdev->dev), dsi);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret, "Failed to request DSI irq\n");
+	dev_info(&pdev->dev, "evergo: dsi irq %d registered\n", irq_num);
+
 	ret = mipi_dsi_host_register(&dsi->host);
 	if (ret < 0)
 		return dev_err_probe(dev, ret, "Failed to register DSI host\n");
-
-	ret = devm_request_irq(&pdev->dev, irq_num, mtk_dsi_irq,
-			       IRQF_TRIGGER_NONE, dev_name(&pdev->dev), dsi);
-	if (ret) {
-		mipi_dsi_host_unregister(&dsi->host);
-		return dev_err_probe(&pdev->dev, ret, "Failed to request DSI irq\n");
-	}
-	dev_info(&pdev->dev, "evergo: dsi irq %d registered\n", irq_num);
 
 	dsi->bridge.of_node = dev->of_node;
 	dsi->bridge.type = DRM_MODE_CONNECTOR_DSI;
 
 	/*
 	 * evergo debug: two-shot command self-test + the phase-2 VDO walk
-	 * (see evergo_dsi_selftest() / evergo_dsi_vdo_test()).  b200 keeps
+	 * (see evergo_dsi_selftest() / evergo_dsi_vdo_test()).  This keeps
 	 * them unscheduled while the real modeset path is under test; flip
 	 * evergo_selftests_disabled back to false for the connector-off rig.
 	 */

@@ -1161,10 +1161,16 @@ static int mtk_drm_probe(struct platform_device *pdev)
 		int comp_id;
 
 		ret = mtk_drm_of_get_ddp_comp_type(node, &comp_type);
-		if (ret)
+		if (ret) {
+			if (of_node_name_eq(node, "mutex"))
+				dev_info(dev, "%pOF not recognised (%d)\n",
+					 node, ret);
 			continue;
+		}
 
 		if (!of_device_is_available(node)) {
+			if (of_node_name_eq(node, "mutex"))
+				dev_info(dev, "%pOF disabled\n", node);
 			dev_dbg(dev, "Skipping disabled component %pOF\n",
 				node);
 			continue;
@@ -1174,6 +1180,11 @@ static int mtk_drm_probe(struct platform_device *pdev)
 			int id;
 
 			id = of_alias_get_id(node, "mutex");
+			dev_info(dev,
+				 "mutex %pOF alias id=%d mmsys_id=%d -> %s\n",
+				 node, id, private->data->mmsys_id,
+				 (id < 0 || id == private->data->mmsys_id) ?
+				 "selected" : "skipped");
 			if (id < 0 || id == private->data->mmsys_id) {
 				private->mutex_node = of_node_get(node);
 				dev_dbg(dev, "get mutex for mmsys %d", private->data->mmsys_id);
@@ -1223,6 +1234,8 @@ static int mtk_drm_probe(struct platform_device *pdev)
 		}
 	}
 
+	dev_info(dev, "mutex_node=%s\n",
+		 private->mutex_node ? private->mutex_node->full_name : "NONE");
 	if (!private->mutex_node) {
 		dev_err(dev, "Failed to find disp-mutex node\n");
 		ret = -ENODEV;

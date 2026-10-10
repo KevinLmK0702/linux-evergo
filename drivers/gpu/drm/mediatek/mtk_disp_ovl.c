@@ -24,10 +24,14 @@
 #define OVL_FME_CPL_INT					BIT(1)
 #define DISP_REG_OVL_INTSTA			0x0008
 #define DISP_REG_OVL_EN				0x000c
+#define OVL_EN                                  BIT(0)
+#define OVL_HF_FOVL_CK_ON                       BIT(10)
 #define DISP_REG_OVL_RST			0x0014
 #define DISP_REG_OVL_ROI_SIZE			0x0020
 #define DISP_REG_OVL_DATAPATH_CON		0x0024
 #define OVL_LAYER_SMI_ID_EN				BIT(0)
+#define OVL_GCLAST_EN                           BIT(24)
+#define OVL_OUTPUT_CLAMP                        BIT(26)
 #define OVL_BGCLR_SEL_IN				BIT(2)
 #define OVL_LAYER_AFBC_EN(n)				BIT(4+n)
 #define DISP_REG_OVL_ROI_BGCLR			0x0028
@@ -167,12 +171,24 @@ struct mtk_disp_ovl {
 	void				*vblank_cb_data;
 };
 
+/* evergo debug: timestamp the first 40 frame-completion interrupts so the
+ * log shows exactly when the OVL event stream stops (the flip_done timeouts
+ * that wedge the first commit for 63 s start when it does). */
+static u32 evergo_ovl_irq_count;
+
 static irqreturn_t mtk_disp_ovl_irq_handler(int irq, void *dev_id)
 {
 	struct mtk_disp_ovl *priv = dev_id;
 
 	/* Clear frame completion interrupt */
 	writel(0x0, priv->regs + DISP_REG_OVL_INTSTA);
+
+	if (evergo_ovl_irq_count < 40)
+		pr_info("evergo: ovl irq#%u at %ums intsta_now=%08x en=%08x\n",
+			evergo_ovl_irq_count, jiffies_to_msecs(jiffies),
+			readl(priv->regs + DISP_REG_OVL_INTSTA),
+			readl(priv->regs + DISP_REG_OVL_EN));
+	evergo_ovl_irq_count++;
 
 	if (!priv->vblank_cb)
 		return IRQ_NONE;
@@ -260,15 +276,29 @@ void mtk_ovl_clk_disable(struct device *dev)
 void mtk_ovl_start(struct device *dev)
 {
 	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+	unsigned int reg;
 
-	if (ovl->data->smi_id_en) {
-		unsigned int reg;
+	/*
+	 * the vendor bring-up sequence (ovl_start() in the mt6833 BSP)
+	 * sets more than just OVL_EN, and two of those bits explain the
+	 * frame-completion blackout seen on this board:
+	 *   - HF_FOVL_CK_ON (EN bit 10): without the high-frequency overlay
+	 *     clock the OVL pipeline never advances, so no FME_CPL event is
+	 *     ever produced (the first five interrupts came from the block
+	 *     state the bootloader left behind).
+	 *   - LAYER_SMI_ID_EN (DATAPATH_CON bit 0) and GCLAST_EN: the layer
+	 *     read requests carry no SMI port id, which the BSP hardware
+	 *     reports as RDMA0_EOF_ABNORMAL / BUFFER_UNDERRUN downstream.
+	 * The upstream driver relies on the bootloader for these; on this
+	 * board the bootloader hands over with them cleared.
+	 */
+	reg = readl(ovl->regs + DISP_REG_OVL_EN);
+	reg |= OVL_EN | OVL_HF_FOVL_CK_ON;
+	writel(reg, ovl->regs + DISP_REG_OVL_EN);
 
-		reg = readl(ovl->regs + DISP_REG_OVL_DATAPATH_CON);
-		reg = reg | OVL_LAYER_SMI_ID_EN;
-		writel_relaxed(reg, ovl->regs + DISP_REG_OVL_DATAPATH_CON);
-	}
-	writel_relaxed(0x1, ovl->regs + DISP_REG_OVL_EN);
+	reg = readl(ovl->regs + DISP_REG_OVL_DATAPATH_CON);
+	reg |= OVL_LAYER_SMI_ID_EN | OVL_GCLAST_EN | OVL_OUTPUT_CLAMP;
+	writel(reg, ovl->regs + DISP_REG_OVL_DATAPATH_CON);
 }
 
 void mtk_ovl_stop(struct device *dev)

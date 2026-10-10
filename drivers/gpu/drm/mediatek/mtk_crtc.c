@@ -277,6 +277,17 @@ struct mtk_ddp_comp *mtk_ddp_comp_for_plane(struct drm_crtc *crtc,
 }
 
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
+/*
+ * keep the GCE out of the display bring-up.  The cmdq packet that
+ * programs OVL/RDMA dies with a GCE thread error ("evergo: cmdq cb
+ * sta=-8" = CMDQ_THR_IRQ_ERROR) and the first commit then never
+ * completes (flip_done/vblank timeouts, 60+ s stall).  With
+ * cmdq_client.chan == NULL the driver uses the mainline flow: OVL/RDMA
+ * registers are written by the CPU at the vblank irq and flips are
+ * completed from that same irq.  Flip this back on once cmdq is fixed.
+ */
+static bool mtk_crtc_use_cmdq;
+
 static void ddp_cmdq_cb(struct mbox_client *cl, void *mssg)
 {
 	struct cmdq_cb_data *data = mssg;
@@ -342,6 +353,17 @@ ddp_cmdq_cb_out:
 }
 #endif
 
+/*
+ * the bootloader leaves a fully working display (its logo is on the
+ * panel when the kernel starts).  Everything the kernel has tried to write
+ * into OVL/RDMA/mutex so far made the frame stream stop at the exact moment
+ * the DSI engine powers on.  For this experiment the kernel writes *nothing*
+ * into those blocks and only brings up the DSI: if the bootloader's pixels
+ * then keep flowing, some kernel write is what kills them and we can bisekt;
+ * if not, the DSI poweron/reset itself is the culprit.
+ */
+static bool evergo_keep_lk_disp = true;
+
 static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 {
 	struct drm_crtc *crtc = &mtk_crtc->base;
@@ -393,6 +415,12 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 		goto err_mutex_unprepare;
 	}
 
+	/*
+	 * restore the mmsys route writes now that the
+	 * DSI0_SEL_IN route value matches the bootloader (f30=1, DITHER0 path).
+	 * writing 0 there (the old table value) killed the stream.  The
+	 * OVL0_MOUT_EN write is a no-op (both write BIT(0)).
+	 */
 	for (i = 0; i < mtk_crtc->ddp_comp_nr - 1; i++) {
 		if (!mtk_ddp_comp_connect(mtk_crtc->ddp_comp[i], mtk_crtc->mmsys_dev,
 					  mtk_crtc->ddp_comp[i + 1]->id))
@@ -407,11 +435,42 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 		mtk_mutex_add_comp(mtk_crtc->mutex, mtk_crtc->ddp_comp[i]->id);
 	mtk_mutex_enable(mtk_crtc->mutex);
 
+	/*
+	 * break the frame-start deadlock.  The mutex was left by the
+	 * bootloader with SOF/EOF sourced from DSI0 (0x41).  With that setup
+	 * nobody moves first on this board: OVL waits for the DSI0 SOF pulse,
+	 * while the DSI engine itself reports TE_TIMEOUT / BUFFER_UNDERRUN /
+	 * INP_UNFINISH -- it produces sync events but starves for pixel data,
+	 * so no SOF pulse ever reaches the mutex and the whole ring sits
+	 * still (OVL: 5-6 frame-complete interrupts, then nothing; fsync
+	 * waits wedged for 63 s).  The upstream SoC mutex driver only knows
+	 * MUTEX_SOF_IDX_SINGLE_MODE, i.e. the mutex generates its own SOF
+	 * and does not depend on any downstream engine.  Write that once the
+	 * mutex is enabled (reads back 0x00000000 instead of 0x41).
+	 */
+	if (!evergo_keep_lk_disp) {
+		mtk_mutex_write_sof(mtk_crtc->mutex, MUTEX_SOF_IDX_SINGLE_MODE);
+		{
+			static bool evergo_sof_logged;
+
+			if (!evergo_sof_logged) {
+				evergo_sof_logged = true;
+				dev_info(mtk_crtc->mmsys_dev,
+					 "evergo: mutex SOF forced to SINGLE mode\n");
+			}
+		}
+	}
+
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
 		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[i];
 
 		if (i == 1)
 			mtk_ddp_comp_bgclr_in_on(comp);
+
+		if (evergo_keep_lk_disp &&
+		    (comp->id == DDP_COMPONENT_OVL0 ||
+		     comp->id == DDP_COMPONENT_RDMA0))
+			continue;
 
 		mtk_ddp_comp_config(comp, width, height, vrefresh, bpc, NULL);
 		mtk_ddp_comp_start(comp);
@@ -484,6 +543,61 @@ static void mtk_crtc_ddp_hw_fini(struct mtk_crtc *mtk_crtc)
 		crtc->state->event = NULL;
 		spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
 	}
+}
+
+/*
+ * periodic kick workaround.  The frame-completion stream dies at the
+ * moment the DSI engine powers on and a single re-kick does not survive --
+ * either the pipeline must be re-armed after everything settled, or it needs
+ * a heartbeat forever.  Kick OVL0/RDMA0 once a second (ten times) and log
+ * each kick so the log shows whether the frame interrupts ever resume.
+ */
+static struct delayed_work evergo_kick_work;
+static struct mtk_crtc *evergo_kick_crtc;
+
+static void mtk_crtc_ddp_config(struct drm_crtc *crtc,
+				struct cmdq_pkt *cmdq_handle);
+
+static void evergo_kick_worker(struct work_struct *work)
+{
+	static unsigned int count;
+	struct mtk_crtc *mtk_crtc = evergo_kick_crtc;
+	int j;
+
+	if (!mtk_crtc || !mtk_crtc->enabled)
+		return;
+
+	/*
+	 * a plain EN toggle does nothing.  Re-run the whole
+	 * bring-up sequence instead, with everything (DSI included) already
+	 * powered: re-enable the mutex, re-write its SOF source, re-arm the
+	 * data-path components and rewrite the layer configuration.
+	 */
+	mutex_lock(&mtk_crtc->hw_lock);
+
+	mtk_mutex_enable(mtk_crtc->mutex);
+	mtk_mutex_write_sof(mtk_crtc->mutex, MUTEX_SOF_IDX_SINGLE_MODE);
+
+	for (j = 0; j < mtk_crtc->ddp_comp_nr; j++) {
+		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[j];
+
+		if (comp->id == DDP_COMPONENT_OVL0 ||
+		    comp->id == DDP_COMPONENT_RDMA0) {
+			mtk_ddp_comp_stop(comp);
+			mtk_ddp_comp_start(comp);
+		}
+	}
+
+	mtk_crtc_ddp_config(&mtk_crtc->base, NULL);
+
+	mutex_unlock(&mtk_crtc->hw_lock);
+
+	count++;
+	dev_info(mtk_crtc->mmsys_dev, "evergo: periodic re-init #%u\n", count);
+
+	if (count < 10)
+		schedule_delayed_work(&evergo_kick_work,
+				      msecs_to_jiffies(1000));
 }
 
 static void mtk_crtc_ddp_config(struct drm_crtc *crtc,
@@ -603,6 +717,67 @@ static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
 		mtk_mutex_acquire(mtk_crtc->mutex);
 		mtk_crtc_ddp_config(crtc, NULL);
 		mtk_mutex_release(mtk_crtc->mutex);
+	}
+
+	/*
+	 * apply the pending config right away with CPU writes when
+	 * there is no cmdq and the crtc is already up.
+	 *
+	 * Without this the config would only be applied from
+	 * mtk_crtc_ddp_irq() -- which needs OVL/RDMA frame interrupts, which
+	 * need a running *and configured* pipeline.  Earlier attempts showed the
+	 * deadlock: the first layer/address never reached the hardware,
+	 * nothing ever ran, no vblank arrived and every commit sat in
+	 * flip_done/vblank timeouts for a minute.  The module registers are
+	 * double-buffered, so a mid-frame write still latches at the next
+	 * frame boundary.
+	 */
+	if (!evergo_keep_lk_disp &&
+	    !priv->data->shadow_register && !mtk_crtc->cmdq_client.chan &&
+	    mtk_crtc->enabled) {
+		static bool evergo_logged;
+
+		if (!evergo_logged) {
+			evergo_logged = true;
+			dev_info(crtc->dev->dev,
+				 "evergo: CPU config from flush (no cmdq)\n");
+		}
+		mtk_crtc_ddp_config(crtc, NULL);
+
+		/*
+		 * kick the pipeline back to life once the config has been
+		 * written.  The frame-completion stream stops around the time the
+		 * DSI engine is powered on and reset (5-6 OVL
+		 * interrupts in a 50 ms window, then silence, even with the
+		 * mutex SOF switched to SINGLE mode).  Stop+start the two
+		 * display-path components that carry the pixel flow so the
+		 * hardware re-arms its request/EOF logic after everything
+		 * (DSI included) is finally up.
+		 */
+		{
+			static bool evergo_kicked;
+			int j;
+
+			if (!evergo_kicked) {
+				evergo_kicked = true;
+				for (j = 0; j < mtk_crtc->ddp_comp_nr; j++) {
+					struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[j];
+
+					if (comp->id == DDP_COMPONENT_OVL0 ||
+					    comp->id == DDP_COMPONENT_RDMA0) {
+						mtk_ddp_comp_stop(comp);
+						mtk_ddp_comp_start(comp);
+					}
+				}
+				dev_info(crtc->dev->dev,
+					 "evergo: display comps re-kicked\n");
+				evergo_kick_crtc = mtk_crtc;
+				INIT_DELAYED_WORK(&evergo_kick_work, evergo_kick_worker);
+				if (!evergo_keep_lk_disp)
+					schedule_delayed_work(&evergo_kick_work,
+							      msecs_to_jiffies(1000));
+			}
+		}
 	}
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	if (mtk_crtc->cmdq_client.chan) {
@@ -1124,6 +1299,7 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
 	spin_lock_init(&mtk_crtc->config_lock);
 
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
+	if (mtk_crtc_use_cmdq) {
 	i = priv->mbox_index++;
 	mtk_crtc->cmdq_client.client.dev = mtk_crtc->mmsys_dev;
 	mtk_crtc->cmdq_client.client.tx_block = false;
@@ -1161,6 +1337,7 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
 
 		/* for sending blocking cmd in crtc disable */
 		init_waitqueue_head(&mtk_crtc->cb_blocking_queue);
+	}
 	}
 #endif
 

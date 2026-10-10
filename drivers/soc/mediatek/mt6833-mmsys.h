@@ -7,7 +7,13 @@
 #define MT6833_DISP_DSI0_SEL_IN		0xf30
 
 #define MT6833_OVL0_MOUT_EN_RDMA0	BIT(0)
-#define MT6833_DSI0_SEL_IN_RDMA0	0x0
+/*
+ * the bootloader programs f30 (DSI0_SEL_IN) with value 1, i.e. the
+ * DITHER0 input -- vendor headers define DITHER0 as 1 and RDMA0_RSZ0_SOUT
+ * as 0.  Writing 0 killed the live stream on evergo; 1 matches
+ * the bootloader and is verified on hardware.
+ */
+#define MT6833_DSI0_SEL_IN_RDMA0	0x1
 
 static const struct mtk_mmsys_routes mmsys_mt6833_routing_table[] = {
 	MMSYS_ROUTE(OVL, 0, RDMA, 0,

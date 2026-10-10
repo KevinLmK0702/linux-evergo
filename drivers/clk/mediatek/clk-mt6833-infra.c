@@ -229,6 +229,14 @@ static const struct mtk_gate ifrao_clks[] = {
 
 static const struct mtk_clk_desc infra_desc = {
 	.clks = ifrao_clks,
+	/*
+	 * ifrao_clks[] lists 87 gates while the binding IDs run up to
+	 * CLK_IFRAO_AP_DMA (114).  num_clks is the number of entries walked
+	 * during registration, so it must stay ARRAY_SIZE (do NOT put
+	 * CLK_IFRAO_NR_CLK here: that reads past the array);
+	 * mtk_clk_simple_probe() already sizes the onecell by the highest
+	 * gate ID, which keeps the sparse IDs addressable.
+	 */
 	.num_clks = ARRAY_SIZE(ifrao_clks),
 };
 

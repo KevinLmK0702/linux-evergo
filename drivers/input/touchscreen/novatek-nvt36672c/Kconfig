@@ -1,0 +1,14 @@
+#
+# Novatek NT36672C touchscreen driver
+#
+config TOUCHSCREEN_NOVATEK_NVT36672C
+	tristate "Novatek NT36672C SPI touchscreen support"
+	depends on SPI
+	help
+	  Say Y here if you have a Novatek NT36672C touchscreen
+	  connected over SPI.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called novatek-nvt36672c.

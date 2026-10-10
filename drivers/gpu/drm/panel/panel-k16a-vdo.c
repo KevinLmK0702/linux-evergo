@@ -358,28 +358,47 @@ static int k16a_probe(struct mipi_dsi_device *dsi)
 	ctx->dsi = dsi;
 	ctx->desc = of_device_get_match_data(dev);
 
-	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
+	/*
+	 * b223: request every control pin AS-IS.  The probe used to force
+	 * values (reset high, pm-enable high, bias low) and b222 showed the
+	 * result: the LM36273 answered i2c at 0.37 s and was already wedged
+	 * by scan time, with this probe (0.62 s) the only actor in between --
+	 * yanking the bias switches (137/138) low while the chip's outputs
+	 * were still on (LK leaves the panel running) is the prime suspect.
+	 * Keep whatever the bootloader/lm36273 driver set; only prepare() and
+	 * unprepare() may drive values, matching the vendor flow.
+	 */
+	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_ASIS);
 	if (IS_ERR(ctx->reset_gpio))
 		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
 				     "failed to get reset gpio\n");
 
 	ctx->pm_gpio = devm_gpiod_get_optional(dev, "pm-enable",
-					       GPIOD_OUT_HIGH);
+					       GPIOD_ASIS);
 	if (IS_ERR(ctx->pm_gpio))
 		return dev_err_probe(dev, PTR_ERR(ctx->pm_gpio),
 				     "failed to get pm-enable gpio\n");
 
-	ctx->bl_en_gpio = devm_gpiod_get(dev, "lcm-bl-enable", GPIOD_OUT_LOW);
+	/*
+	 * NOTE (b221/b223): this pin also enables the LM36273 backlight/bias
+	 * chip on the same flex ("lcm-bl-enable" in the vendor tree).  It
+	 * MUST be high: b220 showed that probing with GPIOD_OUT_LOW
+	 * silently disabled the chip seconds after boot.  Since b223 it is
+	 * requested AS-IS (our lm36273 pinctrl state already drove it high
+	 * at 0.37 s); the probe must not change any of these pins, only
+	 * prepare()/unprepare() drive values, as in the vendor driver.
+	 */
+	ctx->bl_en_gpio = devm_gpiod_get(dev, "lcm-bl-enable", GPIOD_ASIS);
 	if (IS_ERR(ctx->bl_en_gpio))
 		return dev_err_probe(dev, PTR_ERR(ctx->bl_en_gpio),
 				     "failed to get lcm-bl-enable gpio\n");
 
-	ctx->bias_pos = devm_gpiod_get_index(dev, "bias", 0, GPIOD_OUT_LOW);
+	ctx->bias_pos = devm_gpiod_get_index(dev, "bias", 0, GPIOD_ASIS);
 	if (IS_ERR(ctx->bias_pos))
 		return dev_err_probe(dev, PTR_ERR(ctx->bias_pos),
 				     "failed to get bias gpio 0\n");
 
-	ctx->bias_neg = devm_gpiod_get_index(dev, "bias", 1, GPIOD_OUT_LOW);
+	ctx->bias_neg = devm_gpiod_get_index(dev, "bias", 1, GPIOD_ASIS);
 	if (IS_ERR(ctx->bias_neg))
 		return dev_err_probe(dev, PTR_ERR(ctx->bias_neg),
 				     "failed to get bias gpio 1\n");

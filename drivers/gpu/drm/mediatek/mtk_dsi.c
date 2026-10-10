@@ -14,6 +14,7 @@
 #include <linux/platform_device.h>
 #include <linux/reset.h>
 #include <linux/units.h>
+#include <linux/workqueue.h>
 
 #include <video/mipi_display.h>
 #include <video/videomode.h>
@@ -233,6 +234,10 @@ struct mtk_dsi {
 	wait_queue_head_t irq_wait_queue;
 	const struct mtk_dsi_driver_data *driver_data;
 };
+
+/* evergo: proof of how far the interrupt path works when a wait times out */
+static u32 evergo_dsi_irq_count;	/* handler entries, any status */
+static u32 evergo_dsi_irq_hit;		/* entries that saw a flag we care about */
 
 static inline struct mtk_dsi *bridge_to_dsi(struct drm_bridge *b)
 {
@@ -719,8 +724,14 @@ static void mtk_dsi_set_cmd_mode(struct mtk_dsi *dsi)
 static void mtk_dsi_set_interrupt_enable(struct mtk_dsi *dsi)
 {
 	u32 inten = LPRX_RD_RDY_INT_FLAG | CMD_DONE_INT_FLAG | VM_DONE_INT_FLAG;
+	static bool logged;
 
 	writel(inten, dsi->regs + DSI_INTEN);
+	if (!logged) {
+		logged = true;
+		dev_info(dsi->dev, "evergo: dsi inten wrote %08x, reads %08x\n",
+			 inten, readl(dsi->regs + DSI_INTEN));
+	}
 }
 
 static void mtk_dsi_irq_data_set(struct mtk_dsi *dsi, u32 irq_bit)
@@ -739,12 +750,34 @@ static s32 mtk_dsi_wait_for_irq_done(struct mtk_dsi *dsi, u32 irq_flag,
 	s32 ret = 0;
 	unsigned long jiffies = msecs_to_jiffies(timeout);
 	struct drm_device *drm = dsi->bridge.dev;
+	u32 entry_sta;
+
+	/*
+	 * evergo debug: clear every event flag before waiting, so a timeout
+	 * dump below prints provably FRESH bits (arrived during this wait).
+	 * INTSTA is write-ZERO-to-clear: 0x80000000 writes 0 to bits 0-30
+	 * (clear) and 1 to BUSY (bit 31, no-op).  The b195 version wrote
+	 * 0x7fffffff - the exact inverse - and cleared nothing.
+	 */
+	entry_sta = readl(dsi->regs + DSI_INTSTA);
+	if (entry_sta & ~DSI_BUSY)
+		dev_info(dsi->dev, "evergo: wait(%08x) entry intsta=%08x cleared\n",
+			 irq_flag, entry_sta);
+	writel(0x80000000, dsi->regs + DSI_INTSTA);
 
 	ret = wait_event_interruptible_timeout(dsi->irq_wait_queue,
 					       dsi->irq_data & irq_flag,
 					       jiffies);
 	if (ret == 0) {
 		drm_warn(drm, "Wait DSI IRQ(0x%08x) Timeout\n", irq_flag);
+		drm_err(drm, "evergo: dsi irq timeout: want=%08x irq_data=%08x intsta_fresh=%08x inten=%08x mode=%08x con=%08x txrx=%08x irq_cnt=%u irq_hit=%u\n",
+			irq_flag, dsi->irq_data,
+			readl(dsi->regs + DSI_INTSTA),
+			readl(dsi->regs + DSI_INTEN),
+			readl(dsi->regs + DSI_MODE_CTRL),
+			readl(dsi->regs + DSI_CON_CTRL),
+			readl(dsi->regs + DSI_TXRX_CTRL),
+			evergo_dsi_irq_count, evergo_dsi_irq_hit);
 
 		mtk_dsi_enable(dsi);
 		mtk_dsi_reset_engine(dsi);
@@ -759,9 +792,11 @@ static irqreturn_t mtk_dsi_irq(int irq, void *dev_id)
 	u32 status, tmp;
 	u32 flag = LPRX_RD_RDY_INT_FLAG | CMD_DONE_INT_FLAG | VM_DONE_INT_FLAG;
 
+	evergo_dsi_irq_count++;
 	status = readl(dsi->regs + DSI_INTSTA) & flag;
 
 	if (status) {
+		evergo_dsi_irq_hit++;
 		do {
 			mtk_dsi_mask(dsi, DSI_RACK, RACK, RACK);
 			tmp = readl(dsi->regs + DSI_INTSTA);
@@ -855,6 +890,10 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 		dev_err(dev, "Failed to enable digital clock: %d\n", ret);
 		goto err_disable_engine_clk;
 	}
+
+	dev_info(dev, "evergo: dsi poweron cphy=%d rate=%u engine=%lu digital=%lu hs=%lu\n",
+		 dsi->cphy, dsi->data_rate, clk_get_rate(dsi->engine_clk),
+		 clk_get_rate(dsi->digital_clk), clk_get_rate(dsi->hs_clk));
 
 	mtk_dsi_enable(dsi);
 
@@ -1342,6 +1381,157 @@ static const struct mipi_dsi_host_ops mtk_dsi_ops = {
 	.transfer = mtk_dsi_host_transfer,
 };
 
+/*
+ * evergo debug: can the DSI block produce a completion event at all?
+ *
+ * The connector-on boots stall or hard-hang before anything useful can be
+ * watched, so this runs with the connector forced off, seconds after the
+ * system is up: it walks the same "send one DCS command" path a real
+ * transfer uses (INTEN, command mode, lane ready, command queue, start)
+ * and waits for CMD_DONE through the instrumented wait whose timeout dump
+ * prints only FRESH status bits.  Two attempts, 10 s apart.  No CRTC, no
+ * fbcon, no vblank - nothing here can wedge the boot path.
+ */
+static struct mtk_dsi *evergo_selftest_dsi;
+static struct delayed_work evergo_selftest_work;
+static int evergo_selftest_tries;
+
+/*
+ * b200: the real-modeset test owns the block, so the diagnostics stay off.
+ * Both works power the DSI up themselves (refcount, mode switches), which
+ * would defeat the real enable path: with refcount already 1, the bridge's
+ * mtk_dsi_poweron() is a no-op and the VDO timing/PS setup for the real
+ * mode never runs.  Set to false to get the connector-off diagnostics back.
+ */
+static bool evergo_selftests_disabled = true;
+
+static void evergo_dsi_selftest(struct work_struct *work)
+{
+	struct mtk_dsi *dsi = evergo_selftest_dsi;
+	static const u8 dcs = 0x11;	/* sleep out: harmless on a dark panel */
+	struct mipi_dsi_msg msg = {
+		.type = MIPI_DSI_DCS_SHORT_WRITE_PARAM,
+		.tx_buf = &dcs,
+		.tx_len = 1,
+	};
+	ssize_t ret;
+	int pret = 0;
+
+	if (!dsi || evergo_selftests_disabled)
+		return;
+
+	evergo_selftest_tries++;
+	dev_info(dsi->dev, "evergo: selftest#%d begin con=%08x mode=%08x intsta=%08x inten=%08x irq_cnt=%u hit=%u\n",
+		 evergo_selftest_tries,
+		 readl(dsi->regs + DSI_CON_CTRL),
+		 readl(dsi->regs + DSI_MODE_CTRL),
+		 readl(dsi->regs + DSI_INTSTA),
+		 readl(dsi->regs + DSI_INTEN),
+		 evergo_dsi_irq_count, evergo_dsi_irq_hit);
+
+	/*
+	 * b195 ran this without the power state a real transfer has (clocks
+	 * and PHY were never raised) and the engine sat BUSY from the LK
+	 * handover on.  Put a plausible pixelclock in place and power the
+	 * block up like a modeset would, then try the command again.
+	 */
+	if (!dsi->vm.pixelclock)
+		dsi->vm.pixelclock = 155520000;	/* feeds data_rate only */
+	if (!dsi->refcount)
+		pret = mtk_dsi_poweron(dsi);
+	dev_info(dsi->dev, "evergo: selftest#%d poweron=%d intsta=%08x con=%08x\n",
+		 evergo_selftest_tries, pret,
+		 readl(dsi->regs + DSI_INTSTA),
+		 readl(dsi->regs + DSI_CON_CTRL));
+
+	mtk_dsi_set_interrupt_enable(dsi);
+	mtk_dsi_set_cmd_mode(dsi);
+	mtk_dsi_lane_ready(dsi);
+	ret = mtk_dsi_host_send_cmd(dsi, &msg, CMD_DONE_INT_FLAG);
+
+	dev_info(dsi->dev, "evergo: selftest#%d end ret=%zd intsta=%08x inten=%08x irq_cnt=%u hit=%u\n",
+		 evergo_selftest_tries, ret,
+		 readl(dsi->regs + DSI_INTSTA),
+		 readl(dsi->regs + DSI_INTEN),
+		 evergo_dsi_irq_count, evergo_dsi_irq_hit);
+
+	if (evergo_selftest_tries < 2)
+		schedule_delayed_work(&evergo_selftest_work,
+				      msecs_to_jiffies(10000));
+}
+
+/*
+ * evergo debug, phase 2: walk the real modeset path step by step, still
+ * with the connector forced off.  Same order as the bridge callbacks:
+ *   pre_enable: lane ready + HS clock      (poweron already done)
+ *   enable:     VDO mode from the panel's mode_flags, then start
+ *   post_disable head: stop, then the VM_DONE wait that used to time
+ *               out with -62 during connector-on boots
+ * One shot at +25 s, after both command selftests.  The block is left
+ * powered and in whatever mode the stop-switch reached.
+ */
+static struct delayed_work evergo_vdo_test_work;
+
+static void evergo_dsi_vdo_test(struct work_struct *work)
+{
+	struct mtk_dsi *dsi = evergo_selftest_dsi;
+	u32 before_irq;
+	int ret;
+
+	if (!dsi || evergo_selftests_disabled)
+		return;
+
+	dev_info(dsi->dev,
+		 "evergo: vdo-test begin refc=%u mode_flags=%08x con=%08x mode=%08x start=%08x intsta=%08x irq=%u/%u\n",
+		 dsi->refcount, dsi->mode_flags,
+		 readl(dsi->regs + DSI_CON_CTRL),
+		 readl(dsi->regs + DSI_MODE_CTRL),
+		 readl(dsi->regs + DSI_START),
+		 readl(dsi->regs + DSI_INTSTA),
+		 evergo_dsi_irq_count, evergo_dsi_irq_hit);
+
+	if (!dsi->vm.pixelclock)
+		dsi->vm.pixelclock = 155520000;	/* feeds data_rate only */
+	if (!dsi->refcount)
+		mtk_dsi_poweron(dsi);
+
+	/* mirror atomic_pre_enable beyond poweron */
+	mtk_dsi_lane_ready(dsi);
+	mtk_dsi_clk_hs_mode(dsi, 1);
+
+	/* mirror mtk_output_dsi_enable(): panel flags pick SYNC_PULSE here */
+	mtk_dsi_set_mode(dsi);
+	mtk_dsi_start(dsi);
+	dev_info(dsi->dev,
+		 "evergo: vdo-test started mode=%08x start=%08x intsta=%08x irq=%u/%u\n",
+		 readl(dsi->regs + DSI_MODE_CTRL),
+		 readl(dsi->regs + DSI_START),
+		 readl(dsi->regs + DSI_INTSTA),
+		 evergo_dsi_irq_count, evergo_dsi_irq_hit);
+
+	/* let it run ~18 frames with nothing feeding pixels */
+	msleep(300);
+	dev_info(dsi->dev,
+		 "evergo: vdo-test running mode=%08x start=%08x intsta=%08x irq=%u/%u\n",
+		 readl(dsi->regs + DSI_MODE_CTRL),
+		 readl(dsi->regs + DSI_START),
+		 readl(dsi->regs + DSI_INTSTA),
+		 evergo_dsi_irq_count, evergo_dsi_irq_hit);
+
+	/* mirror atomic_disable + poweroff head: stop, then VM_DONE wait */
+	before_irq = evergo_dsi_irq_count;
+	mtk_dsi_stop(dsi);
+	ret = mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
+	dev_info(dsi->dev,
+		 "evergo: vdo-test stop->cmd ret=%d irq %u->%u mode=%08x start=%08x intsta=%08x irq_data=%08x\n",
+		 ret, before_irq, evergo_dsi_irq_count,
+		 readl(dsi->regs + DSI_MODE_CTRL),
+		 readl(dsi->regs + DSI_START),
+		 readl(dsi->regs + DSI_INTSTA),
+		 dsi->irq_data);
+	dev_info(dsi->dev, "evergo: vdo-test end (block left powered)\n");
+}
+
 static int mtk_dsi_probe(struct platform_device *pdev)
 {
 	struct mtk_dsi *dsi;
@@ -1415,9 +1605,26 @@ static int mtk_dsi_probe(struct platform_device *pdev)
 		mipi_dsi_host_unregister(&dsi->host);
 		return dev_err_probe(&pdev->dev, ret, "Failed to request DSI irq\n");
 	}
+	dev_info(&pdev->dev, "evergo: dsi irq %d registered\n", irq_num);
 
 	dsi->bridge.of_node = dev->of_node;
 	dsi->bridge.type = DRM_MODE_CONNECTOR_DSI;
+
+	/*
+	 * evergo debug: two-shot command self-test + the phase-2 VDO walk
+	 * (see evergo_dsi_selftest() / evergo_dsi_vdo_test()).  b200 keeps
+	 * them unscheduled while the real modeset path is under test; flip
+	 * evergo_selftests_disabled back to false for the connector-off rig.
+	 */
+	evergo_selftest_dsi = dsi;
+	INIT_DELAYED_WORK(&evergo_selftest_work, evergo_dsi_selftest);
+	INIT_DELAYED_WORK(&evergo_vdo_test_work, evergo_dsi_vdo_test);
+	if (!evergo_selftests_disabled) {
+		schedule_delayed_work(&evergo_selftest_work,
+				      msecs_to_jiffies(5000));
+		schedule_delayed_work(&evergo_vdo_test_work,
+				      msecs_to_jiffies(25000));
+	}
 
 	return 0;
 }

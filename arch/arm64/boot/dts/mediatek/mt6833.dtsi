@@ -30,6 +30,7 @@
 
 	aliases {
 		serial0 = &uart0;
+		mutex0 = &disp_mutex0;
 	};
 
 	cpus {
@@ -408,7 +409,7 @@
 			 * The real clocks, now that the reason they crashed is
 			 * fixed.
 			 *
-			 * b101 enabled these and the board panicked in the mtk_musb
+			 * Enabling these made the board panic in the mtk_musb
 			 * initcall, which is what the old "the board does not boot
 			 * with the real ones" note was about.  The cause turned out
 			 * to be in clk-mt6833-apmixed.c, not here: it registered its
@@ -417,13 +418,13 @@
 			 * clk_hw_onecell_data, and the two structs put their
 			 * members in the opposite order -- so any apmixed clock
 			 * lookup indexed from the num field and faulted.  Fixed in
-			 * that driver (b103), so CLK_APMIXED_USBPLL, which MUSB asks
+			 * that driver, so CLK_APMIXED_USBPLL, which MUSB asks
 			 * for, now resolves.
 			 *
 			 * The 48 MHz SIE clock is a hard requirement for MUSB: with
 			 * 26 MHz fed to "main" the controller's registers sit in a
 			 * clock domain that is not running, and binding a gadget to
-			 * the UDC wedges the bus (b100).
+			 * the UDC wedges the bus.
 			 */
 			clocks = <&infracfg_ao CLK_IFRAO_SSUSB>,
 				 <&apmixedsys CLK_APMIXED_USBPLL>,
@@ -440,7 +441,7 @@
 			 * phy_power_on(glue->phy) is called from inside that switch's
 			 * callback and from nowhere else: as a plain peripheral the PHY
 			 * stayed off, DEVCTL never reported VBUS, and the host saw no
-			 * device at all (b103).
+			 * device at all.
 			 *
 			 * CONFIG_USB_MUSB_DUAL_ROLE (not _GADGET) is what lets this
 			 * property be read instead of being overridden.
@@ -551,6 +552,26 @@
 				 <&infracfg_ao CLK_IFRAO_AP_DMA>;
 			clock-names = "main", "dma";
 			clock-div = <5>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		/*
+		 * SPI1: carries the Novatek NT36672C touchscreen on evergo
+		 * (already the vendor assignment).  Three clocks as the mainline
+		 * mt65xx SPI driver expects: parent (MAINPLL_D5_D4), mux
+		 * (SPI_SEL) and the IFRAO gate.
+		 */
+		spi1: spi@11010000 {
+			compatible = "mediatek,mt6765-spi";
+			mediatek,pad-select = <0>;
+			reg = <0 0x11010000 0 0x1000>;
+			interrupts = <GIC_SPI 160 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&topckgen CLK_TOP_MAINPLL_D5_D4>,
+				 <&topckgen CLK_TOP_SPI_SEL>,
+				 <&infracfg_ao CLK_IFRAO_SPI1>;
+			clock-names = "parent-clk", "sel-clk", "spi-clk";
 			#address-cells = <1>;
 			#size-cells = <0>;
 			status = "disabled";

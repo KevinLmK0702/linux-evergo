@@ -188,6 +188,23 @@ config ARCH_MEDIATEK
 	  This enables support for MediaTek MT27xx, MT65xx, MT76xx
 	  & MT81xx ARMv8 SoCs
 
+config MT6833_EVERGO_FORCE_DT
+	bool "Force the embedded MT6833 evergo device tree (bring-up)"
+	depends on ARCH_MEDIATEK
+	depends on FW_LOADER
+	help
+	  The Little Kernel (LK) bootloader of the Redmi Note 11 5G
+	  (evergo, MT6833P) replaces the device tree found in the boot image
+	  with one it composes itself, because its own display and lcm code
+	  needs the vendor panel data. A mainline kernel therefore never sees
+	  the device tree it was booted with.
+
+	  Say Y to look up the device tree embedded through
+	  CONFIG_EXTRA_FIRMWARE (set to "mt6833-xiaomi-evergo.dtb") and use it
+	  in place of the one handed over by the bootloader. Note that the
+	  bootloader's initrd and command line additions are then ignored as
+	  well, so CONFIG_INITRAMFS_SOURCE should provide the initramfs.
+
 config ARCH_MESON
 	bool "Amlogic Platforms"
 	help

@@ -27,6 +27,7 @@
 #include <linux/proc_fs.h>
 #include <linux/memblock.h>
 #include <linux/of_fdt.h>
+#include <linux/firmware.h>
 #include <linux/efi.h>
 #include <linux/psci.h>
 #include <linux/sched/task.h>
@@ -288,6 +289,27 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 
 	early_fixmap_init();
 	early_ioremap_init();
+
+#ifdef CONFIG_MT6833_EVERGO_FORCE_DT
+	/*
+	 * Bring-up aid: the LK of the evergo composes the device tree itself
+	 * (its display/lcm code needs the vendor panel data), so the one it
+	 * hands over is not the one we want. Use the DT embedded through
+	 * CONFIG_EXTRA_FIRMWARE instead; it is found without any allocation,
+	 * which is what firmware_request_builtin() is meant for.
+	 */
+	{
+		struct firmware fw;
+
+		if (firmware_request_builtin(&fw, "mt6833-xiaomi-evergo.dtb")) {
+			__fdt_pointer = __pa(fw.data);
+			pr_info("evergo: using embedded device tree (%zu bytes)\n",
+				fw.size);
+		} else {
+			pr_warn("evergo: embedded device tree missing, keeping the bootloader one\n");
+		}
+	}
+#endif
 
 	setup_machine_fdt(__fdt_pointer);
 

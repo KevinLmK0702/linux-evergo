@@ -9,6 +9,7 @@
 #include <dt-bindings/phy/phy.h>
 #include <dt-bindings/thermal/thermal.h>
 #include <dt-bindings/clock/mediatek,mt6833-clk.h>
+#include <dt-bindings/power/mediatek,mt6833-power.h>
 /*
  * The mt6833 GCE is an mt8183 clone (same base 0x10228000, same SPI 203,
  * same #mbox-cells = <3>), so its subsys ids and thread priorities carry
@@ -285,6 +286,45 @@
 			#clock-cells = <1>;
 		};
 
+		scpsys: syscon@10006000 {
+			compatible = "mediatek,mt6833-scpsys", "syscon", "simple-mfd";
+			reg = <0 0x10006000 0 0x1000>;
+
+			spm: power-controller {
+				compatible = "mediatek,mt6833-power-controller";
+				#address-cells = <1>;
+				#size-cells = <0>;
+				#power-domain-cells = <1>;
+
+				mfg0: power-domain@MT6833_POWER_DOMAIN_MFG0 {
+					reg = <MT6833_POWER_DOMAIN_MFG0>;
+					clocks = <&topckgen CLK_TOP_MFG_PLL_SEL>,
+						 <&topckgen CLK_TOP_MFG_REF_SEL>;
+					clock-names = "mfg", "alt";
+					#address-cells = <1>;
+					#size-cells = <0>;
+					#power-domain-cells = <1>;
+
+					mfg1: power-domain@MT6833_POWER_DOMAIN_MFG1 {
+						reg = <MT6833_POWER_DOMAIN_MFG1>;
+						mediatek,infracfg = <&infracfg_ao>;
+						#address-cells = <1>;
+						#size-cells = <0>;
+						#power-domain-cells = <1>;
+
+						power-domain@MT6833_POWER_DOMAIN_MFG2 {
+							reg = <MT6833_POWER_DOMAIN_MFG2>;
+							#power-domain-cells = <0>;
+						};
+
+						power-domain@MT6833_POWER_DOMAIN_MFG3 {
+							reg = <MT6833_POWER_DOMAIN_MFG3>;
+							#power-domain-cells = <0>;
+						};
+					};
+				};
+			};
+		};
 		pio: pinctrl {
 			compatible = "mediatek,mt6833-pinctrl";
 			reg =  <0 0x10005000 0 0x1000>,
@@ -577,29 +617,26 @@
 			status = "disabled";
 		};
 
-		/*
 		gpu: gpu@13000000 {
 			compatible = "mediatek,mt6833-mali", "arm,mali-valhall-jm";
 			reg = <0 0x13000000 0 0x4000>;
 			interrupts =
-				<GIC_SPI 364 IRQ_TYPE_LEVEL_HIGH &ppi_cluster0>,
-				<GIC_SPI 365 IRQ_TYPE_LEVEL_HIGH &ppi_cluster0>,
-				<GIC_SPI 366 IRQ_TYPE_LEVEL_HIGH &ppi_cluster0>,
-				<GIC_SPI 367 IRQ_TYPE_LEVEL_HIGH &ppi_cluster0>,
-				<GIC_SPI 368 IRQ_TYPE_LEVEL_HIGH &ppi_cluster0>;
-			interrupt-names =
-				"gpu",
-				"mmu",
-				"job",
-				"event",
-				"power";
-			/* power-domains = <&spm MT6833_POWER_DOMAIN_MFG2>,
-					<&spm MT6833_POWER_DOMAIN_MFG3>; 
-			power-domain-names = "core0",
-					     "core1"; */
-		//	#cooling-cells = <2>;
-		//	status = "disabled";
-		//}; 
+				<GIC_SPI 364 IRQ_TYPE_LEVEL_HIGH>,
+				<GIC_SPI 365 IRQ_TYPE_LEVEL_HIGH>,
+				<GIC_SPI 366 IRQ_TYPE_LEVEL_HIGH>,
+				<GIC_SPI 367 IRQ_TYPE_LEVEL_HIGH>,
+				<GIC_SPI 368 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "gpu", "mmu", "job", "event", "power";
+
+			clocks = <&mfgcfg CLK_MFGCFG_BG3D>;
+			clock-names = "core";
+
+			power-domains = <&spm MT6833_POWER_DOMAIN_MFG2>,
+					<&spm MT6833_POWER_DOMAIN_MFG3>;
+			power-domain-names = "core0", "core1";
+
+			status = "disabled";
+		};
 
 		mfgcfg: clock-controller@13fbf000 {
 			compatible = "mediatek,mt6833-mfgcfg", "syscon";

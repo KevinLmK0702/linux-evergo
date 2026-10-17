@@ -49,7 +49,14 @@
 //---INT trigger mode---
 //#define IRQ_TYPE_EDGE_RISING 1
 //#define IRQ_TYPE_EDGE_FALLING 2
-#define INT_TRIGGER_TYPE IRQ_TYPE_EDGE_FALLING
+/* evergo: level-low instead of falling-edge.  The chip pulls INT low as
+ * soon as it powers up ("I have something to say", observed even before
+ * this driver existed) -- long before probe enables the IRQ.  An edge
+ * trigger misses that first falling edge forever, the handler never runs,
+ * the pending event is never drained and INT stays low: a self-lock.
+ * Level-low fires the threaded handler immediately, it drains the event
+ * and the chip releases the line. */
+#define INT_TRIGGER_TYPE IRQ_TYPE_LEVEL_LOW
 
 //---GPIO pin mode---
 #define PINCTRL_STATE_SPI_DEFAULT   "default"
@@ -191,6 +198,7 @@ int32_t CTP_SPI_READ(struct spi_device *client, uint8_t *buf, uint16_t len);
 int32_t CTP_SPI_WRITE(struct spi_device *client, uint8_t *buf, uint16_t len);
 void nvt_bootloader_reset(void);
 void nvt_eng_reset(void);
+void nvt_reset_pulse(void);
 void nvt_sw_reset(void);
 void nvt_sw_reset_idle(void);
 void nvt_boot_ready(void);

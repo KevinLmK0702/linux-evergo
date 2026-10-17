@@ -63,7 +63,9 @@ static struct pinctrl_state *nt36672_spi_mode_default;
 static struct pinctrl *nvt_tp_pinctrl;
 static struct pinctrl_state *nvt_rst_low, *nvt_rst_def;
 
-static void nvt_reset_pulse(void)
+/* also called from the firmware worker (Boot_Update_Firmware) to boot the
+ * chip out of the bootloader after a (version-checked) download */
+void nvt_reset_pulse(void)
 {
 	if (IS_ERR_OR_NULL(nvt_tp_pinctrl))
 		return;
@@ -248,18 +250,6 @@ int32_t CTP_SPI_READ(struct spi_device *client, uint8_t *buf, uint16_t len)
 		ret = -EIO;
 	} else {
 		memcpy((buf + 1), (ts->rbuf + 2), (len - 1));
-		{
-			static int dbg_n;
-
-			if (dbg_n < 12) {
-				dbg_n++;
-				NVT_LOG("rd#%d len=%u tx=%02x %02x %02x %02x  rx=%02x %02x %02x %02x %02x %02x %02x %02x\n",
-					dbg_n, len,
-					ts->xbuf[0], ts->xbuf[1], ts->xbuf[2], ts->xbuf[3],
-					ts->rbuf[0], ts->rbuf[1], ts->rbuf[2], ts->rbuf[3],
-					ts->rbuf[4], ts->rbuf[5], ts->rbuf[6], ts->rbuf[7]);
-			}
-		}
 	}
 
 	mutex_unlock(&ts->xbuf_lock);
@@ -1185,19 +1175,17 @@ static int32_t nvt_ts_point_data_checksum(uint8_t *buf, uint8_t length)
 	}
 	checksum = (~checksum + 1);
 
-	// Compare ckecksum and dump fail data
+	/* Compare ckecksum.  The startup phase legitimately produces a short
+	 * burst of failures while the chip restarts, so only the first few
+	 * are logged (the old data dump is gone). */
 	if (checksum != buf[length]) {
-		NVT_ERR
-		    ("i2c/spi packet checksum not match. (point_data[%d]=0x%02X, checksum=0x%02X)\n",
-		     length, buf[length], checksum);
+		static int dbg_n;
 
-		for (i = 0; i < 10; i++) {
-			NVT_LOG("%02X %02X %02X %02X %02X %02X\n",
-				buf[1 + i * 6], buf[2 + i * 6], buf[3 + i * 6], buf[4 + i * 6],
-				buf[5 + i * 6], buf[6 + i * 6]);
+		if (dbg_n < 12) {
+			dbg_n++;
+			NVT_ERR("i2c/spi packet checksum not match (point_data[%d]=0x%02X, checksum=0x%02X)\n",
+				length, buf[length], checksum);
 		}
-
-		NVT_LOG("%02X %02X %02X %02X %02X\n", buf[61], buf[62], buf[63], buf[64], buf[65]);
 
 		return -1;
 	}
@@ -1757,7 +1745,10 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 		goto err_create_nvt_fwu_wq_failed;
 	}
 	kthread_init_delayed_work(&ts->nvt_fwu_dw, Boot_Update_Firmware);
-	kthread_queue_delayed_work(nvt_fwu_worker, &ts->nvt_fwu_dw, msecs_to_jiffies(14000));
+	/* evergo: 3 s instead of 14 s -- the boot rounds on this board are
+	 * short (the log-replay cycle reboots often) and the firmware update
+	 * has to fit inside one of them. */
+	kthread_queue_delayed_work(nvt_fwu_worker, &ts->nvt_fwu_dw, msecs_to_jiffies(3000));
 	NVT_LOG("start kthread_queue_delayed_work nt36672c\n");
 #endif
 

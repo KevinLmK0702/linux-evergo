@@ -1023,6 +1023,11 @@ void Boot_Update_Firmware(struct kthread_work *work)
 {
 	mutex_lock(&ts->lock);
 	nvt_update_firmware(BOOT_UPDATE_FIRMWARE_NAME);
+	/* evergo: after the (version-checked) download the chip can sit in the
+	 * bootloader for ~50 s before it emits valid point packets.  A hard
+	 * reset pulse boots it from its own flash straight into the
+	 * application firmware. */
+	nvt_reset_pulse();
 	mutex_unlock(&ts->lock);
 }
 #endif				/* BOOT_UPDATE_FIRMWARE */

@@ -1153,6 +1153,16 @@ static const struct panfrost_compatible mediatek_mt8370_data = {
 	.gpu_quirks = BIT(GPU_QUIRK_FORCE_AARCH64_PGTABLE),
 };
 
+static const char * const mt6833_supplies[] = { "mali", "sram", NULL };
+
+static const struct panfrost_compatible mediatek_mt6833_data = {
+	.num_supplies = ARRAY_SIZE(mt6833_supplies) - 1,
+	.supply_names = mt6833_supplies,
+	.num_pm_domains = 2,
+	.pm_domain_names = mediatek_pm_domains,
+	.gpu_quirks = BIT(GPU_QUIRK_FORCE_AARCH64_PGTABLE),
+};
+
 static const struct of_device_id dt_match[] = {
 	/* Set first to probe before the generic compatibles */
 	{ .compatible = "amlogic,meson-gxm-mali",
@@ -1178,6 +1188,7 @@ static const struct of_device_id dt_match[] = {
 	{ .compatible = "mediatek,mt8188-mali", .data = &mediatek_mt8188_data },
 	{ .compatible = "mediatek,mt8192-mali", .data = &mediatek_mt8192_data },
 	{ .compatible = "mediatek,mt8370-mali", .data = &mediatek_mt8370_data },
+	{ .compatible = "mediatek,mt6833-mali", .data = &mediatek_mt6833_data },
 	{ .compatible = "allwinner,sun50i-h616-mali", .data = &default_pm_rt_data },
 	{}
 };

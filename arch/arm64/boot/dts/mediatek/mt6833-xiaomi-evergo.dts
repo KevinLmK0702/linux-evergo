@@ -47,7 +47,15 @@
 		 * Skipping that one initcall costs nothing here and tells us
 		 * whether the rest of the boot can get past 0.31s.
 		 */
-		bootargs = "earlycon=mtk8250,0x11002000 console=evenring console=ttyS0,921600n8 console=tty0 loglevel=8 ignore_loglevel printk.devkmsg=on clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=10 softlockup_panic=1 watchdog_thresh=5 initcall_blacklist=exynos4_pm_init_power_domain drm.debug=0x1e fbcon=nodefer";
+		/*
+		 * b268: weston's KMS dumb buffers are carved out of the CMA
+		 * pool; one 1080x2400x4 frame is ~10.4 MB, and after fbcon
+		 * took its own buffer the 32 MB default left nothing, so the
+		 * first weston surface died with
+		 *   KMS: DRM_IOCTL_MODE_CREATE_DUMB failed: Out of memory
+		 * 256 MB is comfortable on this 8 GiB unit.
+		 */
+		bootargs = "earlycon=mtk8250,0x11002000 console=evenring console=ttyS0,921600n8 console=tty0 loglevel=8 ignore_loglevel printk.devkmsg=on clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=10 softlockup_panic=1 watchdog_thresh=5 initcall_blacklist=exynos4_pm_init_power_domain drm.debug=0x1e fbcon=nodefer cma=256M";
 		stdout-path = "serial0:921600n8";
 	};
 
@@ -405,9 +413,21 @@
 		reg = <0>;
 		spi-max-frequency = <9600000>;
 
+		/*
+		 * CS timing for the NT36672C.  The vendor driver fed the
+		 * controller cs_setuptime=30 / cs_holdtime=25 / cs_idletime=5
+		 * ticks through its private controller_data; the mainline
+		 * controller takes these standard properties instead.  Values
+		 * are rounded up for the ~54.6 MHz SPI source clock
+		 * (mainpll/20, ~18.3 ns/tick).
+		 */
+		spi-cs-setup-delay-ns = <546>;
+		spi-cs-hold-delay-ns = <455>;
+		spi-cs-inactive-delay-ns = <91>;
+
 		/* irq = GPIO14 on the pio irq controller (falling edge) */
 		interrupt-parent = <&pio>;
-		interrupts = <14 IRQ_TYPE_EDGE_FALLING>;
+		interrupts = <14 IRQ_TYPE_LEVEL_LOW>;
 		irq-gpios = <&pio 14 GPIO_ACTIVE_LOW>;
 
 		novatek,reset-gpio = <&pio 13 GPIO_ACTIVE_LOW>;
@@ -536,4 +556,31 @@
 
 &dsi_out {
 	remote-endpoint = <&panel_in>;
+};
+
+&gpu {
+	status = "okay";
+
+	/*
+	 * Vendor GPU rails on this board (MT6359): VPROC1 buck is the GPU
+	 * core rail (vendor _vgpu), VSRAM_MD LDO the GPU SRAM one
+	 * (vendor _vsram_gpu).
+	 */
+	mali-supply = <&mt6359_vproc1_buck_reg>;
+	sram-supply = <&mt6359_vsram_md_ldo_reg>;
+};
+
+/*
+ * The MTCMOS power-on sequence needs its rails up first: the scpsys
+ * driver enables "domain-supply" before flipping PWR_ON/PWR_ON_2ND,
+ * mirroring the vendor gpufreq order (vgpu/vsram_gpu first, then mtcmos).
+ * Same layout as mt8188-geralt upstream: core rail on mfg0, SRAM rail
+ * on mfg1.  Vendor names: _vgpu = VPROC1 buck, _vsram_gpu = VSRAM_MD.
+ */
+&mfg0 {
+	domain-supply = <&mt6359_vproc1_buck_reg>;
+};
+
+&mfg1 {
+	domain-supply = <&mt6359_vsram_md_ldo_reg>;
 };

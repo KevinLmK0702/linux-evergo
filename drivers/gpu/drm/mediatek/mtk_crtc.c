@@ -99,7 +99,6 @@ static void mtk_crtc_finish_page_flip(struct mtk_crtc *mtk_crtc)
 	unsigned long flags;
 
 	if (mtk_crtc->event) {
-		dev_info(crtc->dev->dev, "evergo: flip done\n");
 		spin_lock_irqsave(&crtc->dev->event_lock, flags);
 		drm_crtc_send_vblank_event(crtc, mtk_crtc->event);
 		drm_crtc_vblank_put(crtc);

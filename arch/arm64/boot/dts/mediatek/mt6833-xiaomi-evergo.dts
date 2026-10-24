@@ -55,7 +55,7 @@
 		 *   KMS: DRM_IOCTL_MODE_CREATE_DUMB failed: Out of memory
 		 * 256 MB is comfortable on this 8 GiB unit.
 		 */
-		bootargs = "earlycon=mtk8250,0x11002000 console=evenring console=ttyS0,921600n8 console=tty0 loglevel=8 ignore_loglevel printk.devkmsg=on clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=10 softlockup_panic=1 watchdog_thresh=5 initcall_blacklist=exynos4_pm_init_power_domain drm.debug=0x1e fbcon=nodefer cma=256M";
+		bootargs = "earlycon=mtk8250,0x11002000 console=evenring console=ttyS0,921600n8 console=tty0 loglevel=7 printk.devkmsg=on clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=10 softlockup_panic=1 watchdog_thresh=5 initcall_blacklist=exynos4_pm_init_power_domain fbcon=nodefer cma=256M";
 		stdout-path = "serial0:921600n8";
 	};
 

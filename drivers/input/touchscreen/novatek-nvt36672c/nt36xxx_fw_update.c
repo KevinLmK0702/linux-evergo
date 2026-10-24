@@ -1021,6 +1021,12 @@ return:
 *******************************************************/
 void Boot_Update_Firmware(struct kthread_work *work)
 {
+	int err = nvt_try_acquire_reset_gpio();
+
+	if (err)
+		NVT_ERR("reset gpio never acquired (%d) -- resets will not work\n",
+			err);
+
 	mutex_lock(&ts->lock);
 	nvt_update_firmware(BOOT_UPDATE_FIRMWARE_NAME);
 	/* evergo: after the (version-checked) download the chip can sit in the
@@ -1028,6 +1034,19 @@ void Boot_Update_Firmware(struct kthread_work *work)
 	 * reset pulse boots it from its own flash straight into the
 	 * application firmware. */
 	nvt_reset_pulse();
+
+	/* evergo: the decisive check.  probe() runs
+	 * nvt_ts_check_chip_ver_trim(), which puts the controller into its
+	 * bootloader; only a successful reset brings it back to the
+	 * application firmware.  Retry once -- a single pulse occasionally
+	 * leaves it in the bootloader. */
+	if (nvt_check_fw_reset_state(RESET_STATE_REK)) {
+		NVT_ERR("controller not at REK, pulsing reset again\n");
+		nvt_reset_pulse();
+		if (nvt_check_fw_reset_state(RESET_STATE_REK))
+			NVT_ERR("controller did NOT reach RESET_STATE_REK: firmware not running\n");
+	}
+
 	mutex_unlock(&ts->lock);
 }
 #endif				/* BOOT_UPDATE_FIRMWARE */

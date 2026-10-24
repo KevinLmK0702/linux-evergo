@@ -425,9 +425,11 @@
 		spi-cs-hold-delay-ns = <455>;
 		spi-cs-inactive-delay-ns = <91>;
 
-		/* irq = GPIO14 on the pio irq controller (falling edge) */
+		/* irq = GPIO14.  The controller pulses INT low when a packet is
+		 * ready, so a falling edge gives exactly one interrupt per packet.
+		 * A level trigger storms (~8000/s), a rising edge never fires. */
 		interrupt-parent = <&pio>;
-		interrupts = <14 IRQ_TYPE_LEVEL_LOW>;
+		interrupts = <14 IRQ_TYPE_EDGE_FALLING>;
 		irq-gpios = <&pio 14 GPIO_ACTIVE_LOW>;
 
 		novatek,reset-gpio = <&pio 13 GPIO_ACTIVE_LOW>;

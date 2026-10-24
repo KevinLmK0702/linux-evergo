@@ -56,7 +56,12 @@
  * the pending event is never drained and INT stays low: a self-lock.
  * Level-low fires the threaded handler immediately, it drains the event
  * and the chip releases the line. */
-#define INT_TRIGGER_TYPE IRQ_TYPE_LEVEL_LOW
+/* evergo: the controller signals "data ready" as a low pulse on INT and
+ * releases the line once the packet has been read.  A level trigger
+ * (IRQ_TYPE_LEVEL_LOW) re-entered the handler ~8000 times per second because
+ * the line stays low far longer than one SPI read; a rising edge never fired
+ * at all.  Falling edge = exactly one interrupt per new packet. */
+#define INT_TRIGGER_TYPE IRQ_TYPE_EDGE_FALLING
 
 //---GPIO pin mode---
 #define PINCTRL_STATE_SPI_DEFAULT   "default"
@@ -93,10 +98,23 @@ extern const uint16_t touch_key_array[TOUCH_KEY_NUM];
 #define NVT_TOUCH_EXT_PROC 0
 #define NVT_TOUCH_MP 0
 #define MT_PROTOCOL_B 1
-#define WAKEUP_GESTURE 1
+/* evergo: keep the gesture KEY_POWER keys out of the input device.
+ *
+ * gesture_key_array[] maps every wakeup gesture to KEY_POWER; registering
+ * those capabilities makes input_id tag the touchscreen "Keyboard
+ * Touchscreen".  With the keyboard role present, neither KWin nor weston
+ * ever delivered the touch events to clients (observed on hardware, while
+ * evtest showed the raw events fine).  Drop the gesture keys until the
+ * gesture-wakeup support is reworked. */
+#define WAKEUP_GESTURE 0
 #if WAKEUP_GESTURE
 extern const uint16_t gesture_key_array[];
 #endif
+/* evergo: two blobs exist and the vendor driver picks between them by LCM
+ * name: "k16a_36_02_0a_vdo" (Tianma) gets novatek_ts_fw.bin, while
+ * "k16a_42_02_0b_vdo" (CSOT) gets novatek_ts_ct_fw.bin.  This board is
+ * CSOT, so nt36xxx.c asks for the _ct_ blob; running the Tianma blob on it
+ * made every button of the right-hand PIN column land one row higher. */
 #define BOOT_UPDATE_FIRMWARE 1
 #define BOOT_UPDATE_FIRMWARE_NAME novatek_firmware
 #define MP_UPDATE_FIRMWARE_NAME   "novatek_ts_mp.bin"
@@ -199,6 +217,7 @@ int32_t CTP_SPI_WRITE(struct spi_device *client, uint8_t *buf, uint16_t len);
 void nvt_bootloader_reset(void);
 void nvt_eng_reset(void);
 void nvt_reset_pulse(void);
+int nvt_try_acquire_reset_gpio(void);
 void nvt_sw_reset(void);
 void nvt_sw_reset_idle(void);
 void nvt_boot_ready(void);

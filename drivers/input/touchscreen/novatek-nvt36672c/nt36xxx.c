@@ -20,6 +20,7 @@
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/proc_fs.h>
 #include <linux/input/mt.h>
 #include <linux/of_irq.h>
@@ -63,19 +64,102 @@ static struct pinctrl_state *nt36672_spi_mode_default;
 static struct pinctrl *nvt_tp_pinctrl;
 static struct pinctrl_state *nvt_rst_low, *nvt_rst_def;
 
+/* evergo: real GPIO descriptor for TP_RST.  The pinctrl states above only
+ * switch the pinmux -- debugfs kept reporting gpio-13 as "in hi" instead of
+ * "out high", so the line was never actually driven and every reset pulse
+ * was a no-op.  That is why a wedged controller needed a reboot. */
+static struct gpio_desc *nvt_rst_gpiod;
+
 /* also called from the firmware worker (Boot_Update_Firmware) to boot the
  * chip out of the bootloader after a (version-checked) download */
+/* evergo: TP_RST may not be available when probe runs (the pio controller is
+ * registered later), so the firmware worker retries the lookup here.  Without
+ * a real descriptor the reset pulse only changes the pinmux and never drives
+ * the line, which leaves the controller stuck in its bootloader (0x77). */
+int nvt_try_acquire_reset_gpio(void)
+{
+	int retry;
+
+	if (nvt_rst_gpiod)
+		return 0;
+
+	/* The descriptor lookup keeps failing with -EPROBE_DEFER, but the
+	 * pinctrl states do work (debugfs shows gpio-13 switching to "out hi"
+	 * once they are applied).  Re-acquire the pinctrl handle here: during
+	 * probe the controller was not registered yet. */
+	if (IS_ERR_OR_NULL(nvt_tp_pinctrl)) {
+		nvt_tp_pinctrl = devm_pinctrl_get(&ts->client->dev);
+		if (IS_ERR(nvt_tp_pinctrl)) {
+			NVT_ERR("pinctrl still unavailable (%ld)\n",
+				PTR_ERR(nvt_tp_pinctrl));
+			nvt_tp_pinctrl = NULL;
+		} else {
+			nvt_rst_def = pinctrl_lookup_state(nvt_tp_pinctrl, "default");
+			nvt_rst_low = pinctrl_lookup_state(nvt_tp_pinctrl, "reset_low");
+			NVT_ERR("pinctrl acquired in worker: reset_low=%s default=%s\n",
+				IS_ERR_OR_NULL(nvt_rst_low) ? "err" : "ok",
+				IS_ERR_OR_NULL(nvt_rst_def) ? "err" : "ok");
+		}
+	}
+
+	for (retry = 0; retry < 20; retry++) {
+		nvt_rst_gpiod = devm_gpiod_get_optional(&ts->client->dev, "reset",
+							GPIOD_OUT_LOW);
+		if (!IS_ERR(nvt_rst_gpiod)) {
+			if (nvt_rst_gpiod)
+				NVT_ERR("gpiod acquired in worker\n");
+			break;
+		}
+
+		if ((int)PTR_ERR(nvt_rst_gpiod) != -EPROBE_DEFER)
+			break;
+		nvt_rst_gpiod = NULL;
+		msleep(500);
+	}
+
+	if (!IS_ERR_OR_NULL(nvt_tp_pinctrl) &&
+	    (!IS_ERR_OR_NULL(nvt_rst_low) || !IS_ERR_OR_NULL(nvt_rst_def)))
+		return 0;
+
+	return nvt_rst_gpiod ? 0 : -ENODEV;
+}
+
 void nvt_reset_pulse(void)
 {
-	if (IS_ERR_OR_NULL(nvt_tp_pinctrl))
+	int ret;
+
+	/* evergo: pinctrl first -- this is the only path proven to bring the
+	 * controller back to RESET_STATE_REK on this board.  Driving the line
+	 * through the GPIO descriptor (gpiod_set_value) leaves the chip in its
+	 * bootloader, most likely because the pinctrl-0 "default" state
+	 * (output-high) fights the descriptor's writes. */
+	if (!IS_ERR_OR_NULL(nvt_tp_pinctrl) &&
+	    (!IS_ERR_OR_NULL(nvt_rst_low) || !IS_ERR_OR_NULL(nvt_rst_def))) {
+		if (!IS_ERR_OR_NULL(nvt_rst_low)) {
+			ret = pinctrl_select_state(nvt_tp_pinctrl, nvt_rst_low);
+			if (ret)
+				pr_err("nvt: select reset_low failed %d\n", ret);
+			msleep(20);
+		}
+		if (!IS_ERR_OR_NULL(nvt_rst_def)) {
+			ret = pinctrl_select_state(nvt_tp_pinctrl, nvt_rst_def);
+			if (ret)
+				pr_err("nvt: select default failed %d\n", ret);
+		}
+		msleep(300);
 		return;
-	if (!IS_ERR_OR_NULL(nvt_rst_low)) {
-		pinctrl_select_state(nvt_tp_pinctrl, nvt_rst_low);
-		msleep(10);
 	}
-	if (!IS_ERR_OR_NULL(nvt_rst_def))
-		pinctrl_select_state(nvt_tp_pinctrl, nvt_rst_def);
-	msleep(120);
+
+	if (nvt_rst_gpiod) {
+		/* reset-gpios is GPIO_ACTIVE_LOW: logical 1 asserts reset */
+		gpiod_set_value_cansleep(nvt_rst_gpiod, 1);
+		msleep(20);
+		gpiod_set_value_cansleep(nvt_rst_gpiod, 0);
+		msleep(300);
+		return;
+	}
+
+	pr_err("nvt: no way to drive TP_RST\n");
 }
 
 #if 0 /* evergo: fb-notifier API gone */
@@ -161,13 +245,45 @@ const struct mtk_chip_config spi_ctrdata = {
 
 static uint8_t bTouchIsAwake;
 
-/*******************************************************
-Description:
-	Novatek touchscreen irq enable/disable function.
+/* evergo: interrupt storm guard.
+ *
+ * A healthy controller only raises INT while a finger is down.  When its
+ * firmware wedges it stops releasing the level-triggered INT line and the
+ * handler is entered tens of thousands of times per second (measured:
+ * ~15000/s, with 11010000.spi rising in lockstep).  The SPI bus is then
+ * saturated, no touch event is ever delivered, and the system becomes
+ * unusable until reboot -- exactly the "touch worked, then died" symptom.
+ *
+ * Around 500 interrupts in one second is already far above any real touch
+ * activity, so exceeding it triggers a controller reset from a work item
+ * (disable_irq() must not be called from the threaded handler itself).
+ */
+#define NVT_IRQ_STORM_THRESHOLD 2000
 
-return:
-	n.a.
-*******************************************************/
+static struct work_struct nvt_recover_work;
+static unsigned int nvt_irq_count;
+static unsigned long nvt_irq_window;
+static int nvt_storm_streak;
+
+/* One decoded touch record of the current frame. */
+struct nvt_point {
+	uint16_t x, y, w, p;
+	uint8_t slot;
+};
+
+/* A pair of records whose coordinates sum to the panel extents (within
+ * this tolerance) is a mirrored companion, not a second finger.  The sums
+ * observed on this panel were 1085/1087 for x (extent 1080) and 2406/2407
+ * for y (extent 2400), so 30 leaves a comfortable margin without ever
+ * pairing two genuine fingers.
+ *
+ * Note: those observations were taken while the controller was running the
+ * WRONG panel firmware (Tianma blob on a CSOT panel -- see firmware_name in
+ * nt36xxx.c).  With the correct blob this should never trigger; the check
+ * is kept as a cheap safety net because a stray pair used to make the
+ * compositor see a two-finger gesture and kill single-finger swipes. */
+#define NVT_MIRROR_TOL 30
+
 static void nvt_irq_enable(bool enable)
 {
 	struct irq_desc *desc;
@@ -177,44 +293,42 @@ static void nvt_irq_enable(bool enable)
 			enable_irq(ts->client->irq);
 			ts->irq_enabled = true;
 		}
-	} else {
-		if (ts->irq_enabled) {
-			disable_irq(ts->client->irq);
-			ts->irq_enabled = false;
-		}
+	} else if (ts->irq_enabled) {
+		disable_irq(ts->client->irq);
+		ts->irq_enabled = false;
 	}
 
 	desc = irq_to_desc(ts->client->irq);
 	NVT_LOG("enable=%d, desc->depth=%d\n", enable, desc->depth);
 }
 
-/*******************************************************
-Description:
-	Novatek touchscreen spi read/write core function.
+static void nvt_recover_fn(struct work_struct *work)
+{
+	static unsigned long last_jiffies;
 
-return:
-	Executive outcomes. 0---succeed.
-*******************************************************/
-static inline int32_t spi_read_write(struct spi_device *client, uint8_t *buf, size_t len,
-				     NVT_SPI_RW rw)
+	if (!time_after(jiffies, last_jiffies + HZ))
+		return;
+	last_jiffies = jiffies;
+	pr_err("nvt: resetting wedged controller\n");
+	nvt_irq_enable(false);
+	nvt_reset_pulse();
+	nvt_irq_enable(true);
+	pr_err("nvt: controller reset complete\n");
+}
+
+static inline int32_t spi_read_write(struct spi_device *client, uint8_t *buf,
+				     size_t len, NVT_SPI_RW rw)
 {
 	struct spi_message m;
-	struct spi_transfer t = {
-		.len = len,
-	};
+	struct spi_transfer t = { .len = len };
 
 	memcpy(ts->xbuf, buf, len + DUMMY_BYTES);
-
-	switch (rw) {
-	case NVTREAD:
+	if (rw == NVTREAD) {
 		t.tx_buf = ts->xbuf;
 		t.rx_buf = ts->rbuf;
-		t.len = (len + DUMMY_BYTES);
-		break;
-
-	case NVTWRITE:
+		t.len = len + DUMMY_BYTES;
+	} else {
 		t.tx_buf = ts->xbuf;
-		break;
 	}
 
 	spi_message_init(&m);
@@ -1217,6 +1331,27 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
 #endif				/* MT_PROTOCOL_B */
 	int32_t i = 0;
 	int32_t finger_cnt = 0;
+	struct nvt_point pts[TOUCH_MAX_FINGER_NUM];
+	int32_t npts = 0;
+
+	/* evergo: storm guard -- see nvt_recover_work.  Checked before taking
+	 * ts->lock so the work item can be queued without the handler holding
+	 * the driver mutex. */
+	if (time_after(jiffies, nvt_irq_window)) {
+		if (nvt_irq_count > NVT_IRQ_STORM_THRESHOLD) {
+			/* only reset when the storm persists, otherwise a burst of
+			 * legitimate touch interrupts gets the controller killed */
+			if (++nvt_storm_streak >= 3) {
+				nvt_storm_streak = 0;
+				schedule_work(&nvt_recover_work);
+			}
+		} else {
+			nvt_storm_streak = 0;
+		}
+		nvt_irq_count = 0;
+		nvt_irq_window = jiffies + HZ;
+	}
+	nvt_irq_count++;
 
 #if WAKEUP_GESTURE
 	if (bTouchIsAwake == 0) {
@@ -1231,6 +1366,11 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
 		NVT_ERR("CTP_SPI_READ failed.(%d)\n", ret);
 		goto XFER_ERROR;
 	}
+
+	/* evergo: while the storm guard is tripped the raw packet used to be
+	 * logged once per second.  That is a debugging aid, not something to
+	 * keep in a production build -- printk to a serial console is
+	 * synchronous and costs milliseconds. */
 #if NVT_TOUCH_WDT_RECOVERY
 	/* ESD protect by WDT */
 	if (nvt_wdt_fw_recovery(point_data)) {
@@ -1242,6 +1382,17 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
 
 	/* ESD protect by FW handshake */
 	if (nvt_fw_recovery(point_data)) {
+		/* evergo: 0x77 in the first six point records is ALSO what the
+		 * controller returns in its idle keep-alive packets, a handful
+		 * per second.  Treating every such packet as a wedge made the
+		 * driver reset the controller once per second while the screen
+		 * sat untouched; each reset costs ~350 ms of dead touch input
+		 * (IRQ off -> reset -> IRQ on) and can swallow the beginning of
+		 * a swipe.  A genuine wedge asserts INT continuously, which is
+		 * what the multi-thousand-interrupts-per-second storm is, so
+		 * only reset when the rate says we are actually in one. */
+		if (nvt_irq_count > NVT_IRQ_STORM_THRESHOLD)
+			schedule_work(&nvt_recover_work);
 #if NVT_TOUCH_ESD_PROTECT
 		nvt_esd_check_enable(true);
 #endif				/* #if NVT_TOUCH_ESD_PROTECT */
@@ -1266,64 +1417,114 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
 #endif
 
 	finger_cnt = 0;
+	npts = 0;
 
+	/* pass 1: decode every record of this frame without reporting yet.
+	 * The firmware sometimes emits a mirrored companion record for a
+	 * contact -- a point rotated 180 degrees about the panel centre --
+	 * and both arrive in the same frame, so they have to be paired up
+	 * before anything is reported. */
 	for (i = 0; i < ts->max_touch_num; i++) {
 		position = 1 + 6 * i;
-		input_id = (uint8_t) (point_data[position + 0] >> 3);
-		if ((input_id == 0) || (input_id > ts->max_touch_num))
+		input_id = (uint8_t) (point_data[position] >> 3);
+		if (!input_id || input_id > ts->max_touch_num)
+			continue;
+		if ((point_data[position] & 0x07) != 0x01 &&
+		    (point_data[position] & 0x07) != 0x02)
 			continue;
 
-		if (((point_data[position] & 0x07) == 0x01) || ((point_data[position] & 0x07) == 0x02)) {	//finger down (enter & moving)
-#if NVT_TOUCH_ESD_PROTECT
-			/* update interrupt timer */
-			irq_timer = jiffies;
-#endif				/* #if NVT_TOUCH_ESD_PROTECT */
-			input_x =
-			    (uint32_t) (point_data[position + 1] << 4) +
-			    (uint32_t) (point_data[position + 3] >> 4);
-			input_y =
-			    (uint32_t) (point_data[position + 2] << 4) +
-			    (uint32_t) (point_data[position + 3] & 0x0F);
-			if ((input_x < 0) || (input_y < 0))
-				continue;
-			if ((input_x > ts->abs_x_max) || (input_y > ts->abs_y_max))
-				continue;
-			input_w = (uint32_t) (point_data[position + 4]);
-			if (input_w == 0)
-				input_w = 1;
-			if (i < 2) {
-				input_p =
-				    (uint32_t) (point_data[position + 5]) +
-				    (uint32_t) (point_data[i + 63] << 8);
-				if (input_p > TOUCH_FORCE_NUM)
-					input_p = TOUCH_FORCE_NUM;
-			} else {
-				input_p = (uint32_t) (point_data[position + 5]);
-			}
-			if (input_p == 0)
-				input_p = 1;
+		input_x = ((uint32_t)point_data[position + 1] << 4) +
+			  (point_data[position + 3] >> 4);
+		input_y = ((uint32_t)point_data[position + 2] << 4) +
+			  (point_data[position + 3] & 0x0f);
+		if (input_x > ts->abs_x_max || input_y > ts->abs_y_max)
+			continue;
 
-#if MT_PROTOCOL_B
-			press_id[input_id - 1] = 1;
-			input_mt_slot(ts->input_dev, input_id - 1);
-			input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER, true);
-#else				/* MT_PROTOCOL_B */
-			input_report_abs(ts->input_dev, ABS_MT_TRACKING_ID, input_id - 1);
-			input_report_key(ts->input_dev, BTN_TOUCH, 1);
-#endif				/* MT_PROTOCOL_B */
+		input_w = point_data[position + 4];
+		if (input_w == 0)
+			input_w = 1;
 
-			input_report_abs(ts->input_dev, ABS_MT_POSITION_X, input_x);
-			input_report_abs(ts->input_dev, ABS_MT_POSITION_Y, input_y);
-			input_report_abs(ts->input_dev, ABS_MT_TOUCH_MAJOR, input_w);
-			input_report_abs(ts->input_dev, ABS_MT_PRESSURE, input_p);
-
-#if MT_PROTOCOL_B
-#else				/* MT_PROTOCOL_B */
-			input_mt_sync(ts->input_dev);
-#endif				/* MT_PROTOCOL_B */
-
-			finger_cnt++;
+		if (i < 2) {
+			input_p = point_data[position + 5] +
+				  (point_data[i + 63] << 8);
+			if (input_p > TOUCH_FORCE_NUM)
+				input_p = TOUCH_FORCE_NUM;
+		} else {
+			input_p = point_data[position + 5];
 		}
+		if (input_p == 0)
+			input_p = 1;
+
+		pts[npts].slot = input_id - 1;
+		pts[npts].x = input_x;
+		pts[npts].y = input_y;
+		pts[npts].w = input_w;
+		pts[npts].p = input_p;
+		npts++;
+		if (npts >= TOUCH_MAX_FINGER_NUM)
+			break;
+	}
+
+	/* Drop mirrored companions.  A pair of records whose coordinates sum
+	 * to the panel extents is one finger plus the firmware's mirror image
+	 * of it, not two fingers; measured on this panel the real finger
+	 * carries the smaller area (3) and the companion the larger (5/6).
+	 *
+	 * This used to only handle the exactly-two case, which left every
+	 * other frame reporting both slots -- the compositor then saw a
+	 * two-finger gesture and single-finger swipes stopped working.  Pair
+	 * greedily over the whole frame instead, so 1, 2, 3 or more records
+	 * are all handled. */
+	if (npts > 1) {
+		int drop[TOUCH_MAX_FINGER_NUM] = { 0 };
+		int a, b, kept = 0;
+
+		for (a = 0; a < npts; a++) {
+			if (drop[a])
+				continue;
+			for (b = a + 1; b < npts; b++) {
+				int dx, dy;
+
+				if (drop[b])
+					continue;
+				dx = ((int)pts[a].x + (int)pts[b].x) -
+				     (int)ts->abs_x_max;
+				dy = ((int)pts[a].y + (int)pts[b].y) -
+				     (int)ts->abs_y_max;
+				if (dx <= -NVT_MIRROR_TOL ||
+				    dx >= NVT_MIRROR_TOL ||
+				    dy <= -NVT_MIRROR_TOL ||
+				    dy >= NVT_MIRROR_TOL)
+					continue;
+
+				/* mirror pair: keep the smaller contact patch */
+				if (pts[a].w > pts[b].w)
+					drop[a] = 1;
+				else
+					drop[b] = 1;
+				break;
+			}
+		}
+
+		for (a = 0; a < npts; a++)
+			if (!drop[a])
+				pts[kept++] = pts[a];
+		npts = kept;
+	}
+
+	/* pass 2: report.  No Y flip here on purpose -- the firmware already
+	 * reports in screen orientation (on the PIN pad "1" is raw_y 1070
+	 * and the "4" below it 1342).  The old abs_y_max - y mirrored the
+	 * pad vertically, which is exactly why tapping "1" produced "4". */
+	for (i = 0; i < npts; i++) {
+		press_id[pts[i].slot] = 1;
+		input_mt_slot(ts->input_dev, pts[i].slot);
+		input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER, true);
+		input_report_abs(ts->input_dev, ABS_MT_POSITION_X, pts[i].x);
+		input_report_abs(ts->input_dev, ABS_MT_POSITION_Y, pts[i].y);
+		input_report_abs(ts->input_dev, ABS_MT_TOUCH_MAJOR, pts[i].w);
+		input_report_abs(ts->input_dev, ABS_MT_PRESSURE, pts[i].p);
+		finger_cnt++;
 	}
 
 #if MT_PROTOCOL_B
@@ -1336,7 +1537,10 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
 		}
 	}
 
-	input_report_key(ts->input_dev, BTN_TOUCH, (finger_cnt > 0));
+	/* evergo: proper MT-B frame terminator.  It also emits the
+	 * single-pointer emulation (ABS_X/ABS_Y + BTN_TOUCH), so the
+	 * hand-rolled BTN_TOUCH report that used to live here is gone. */
+	input_mt_sync_frame(ts->input_dev);
 #else				/* MT_PROTOCOL_B */
 	if (finger_cnt == 0) {
 		input_report_key(ts->input_dev, BTN_TOUCH, 0);
@@ -1490,7 +1694,13 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 	unsigned long size = 0;
 	char firmware_name_jdi[] = "novatek_ts_fw_jdi.bin";
 	char firmware_name_tm[] = "novatek_ts_fw_tm.bin";
-	char firmware_name[] = "novatek_ts_fw.bin";
+	/* evergo: the vendor ships two blobs and picks by LCM name --
+	 * k16a_36_02_0a_vdo (Tianma) uses novatek_ts_fw.bin, while
+	 * k16a_42_02_0b_vdo (CSOT) uses novatek_ts_ct_fw.bin.  This unit is
+	 * CSOT (see the panel node in the evergo dts), and running the Tianma
+	 * blob on it shifted every button of the right-hand PIN column up by
+	 * one row. */
+	char firmware_name[] = "novatek_ts_ct_fw.bin";
 #if ((TOUCH_KEY_NUM > 0) || WAKEUP_GESTURE)
 	int32_t retry = 0;
 #endif
@@ -1499,6 +1709,26 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 	void **retval = NULL;
 #endif
 
+	/* evergo: TP_RST has to be a real GPIO descriptor.  The pinctrl-state
+	 * fallback only switches the pinmux and never drives the line (debugfs
+	 * kept reporting "in hi" instead of "out hi"), so every reset pulse
+	 * was a no-op and the controller stayed stuck in its bootloader after
+	 * nvt_ts_check_chip_ver_trim() -- that is the 0x77 packet storm.
+	 *
+	 * This driver probes at ~0.2 s, before the pio controller is up, so the
+	 * lookup fails with -EPROBE_DEFER.  Do NOT propagate it: the deferred
+	 * probe queue is only re-run when some other driver probes, so the
+	 * touch driver would silently never come back (that is how /dev/input
+	 * disappeared entirely).  Continue here and let Boot_Update_Firmware()
+	 * acquire the line later and reset the controller.
+	 */
+	nvt_rst_gpiod = devm_gpiod_get_optional(&client->dev, "reset", GPIOD_OUT_LOW);
+	if (IS_ERR(nvt_rst_gpiod)) {
+		ret = (int32_t)PTR_ERR(nvt_rst_gpiod);
+		NVT_ERR("gpiod reset lookup failed (%d), pinctrl fallback only\n",
+			ret);
+		nvt_rst_gpiod = NULL;
+	}
 
 	NVT_LOG("start\n");
 
@@ -1590,10 +1820,12 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 	mutex_init(&ts->lock);
 	mutex_init(&ts->xbuf_lock);
 
-	/* drive TP_RST through pinctrl states.  gpiod lookup returned
-	 * -EPROBE_DEFER this early (readback=-517), so the reset pulse
-	 * never actually ran.  "default" drives the line high (released),
-	 * "reset_low" pulls it down for the reset window. */
+	if (nvt_rst_gpiod)
+		NVT_LOG("reset gpio acquired\n");
+
+	/* drive TP_RST through pinctrl states (fallback only -- see the
+	 * descriptor lookup at the top of probe).  "default" drives the line
+	 * high (released), "reset_low" pulls it down for the reset window. */
 	nvt_tp_pinctrl = devm_pinctrl_get(&client->dev);
 	if (!IS_ERR(nvt_tp_pinctrl)) {
 		nvt_rst_def = pinctrl_lookup_state(nvt_tp_pinctrl, "default");
@@ -1670,7 +1902,13 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 	ts->input_dev->propbit[0] = BIT(INPUT_PROP_DIRECT);
 
 #if MT_PROTOCOL_B
-	input_mt_init_slots(ts->input_dev, ts->max_touch_num, 0);
+	/* evergo: DIRECT tells input_mt that this is a touchscreen (not a
+	 * touchpad), which makes input_mt_sync_frame() emulate a single
+	 * pointer through ABS_X/ABS_Y + BTN_TOUCH.  Those two axes therefore
+	 * have to be declared before the slots are initialised. */
+	input_set_abs_params(ts->input_dev, ABS_X, 0, ts->abs_x_max, 0, 0);
+	input_set_abs_params(ts->input_dev, ABS_Y, 0, ts->abs_y_max, 0, 0);
+	input_mt_init_slots(ts->input_dev, ts->max_touch_num, INPUT_MT_DIRECT);
 #endif
 
 	input_set_abs_params(ts->input_dev, ABS_MT_PRESSURE, 0, TOUCH_FORCE_NUM, 0, 0);	//pressure = TOUCH_FORCE_NUM
@@ -1717,6 +1955,8 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 	if (client->irq > 0) {
 		NVT_LOG("int_trigger_type=%d\n", ts->int_trigger_type);
 		ts->irq_enabled = true;
+		INIT_WORK(&nvt_recover_work, nvt_recover_fn);
+		nvt_irq_window = jiffies + HZ;
 		ret = request_threaded_irq(client->irq, NULL, nvt_ts_work_func,
 					   ts->int_trigger_type | IRQF_ONESHOT, NVT_SPI_NAME, ts);
 		if (ret != 0) {
@@ -2097,9 +2337,9 @@ static int32_t nvt_ts_suspend(struct device *dev)
 		input_report_abs(ts->input_dev, ABS_MT_PRESSURE, 0);
 		input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER, 0);
 	}
-#endif
+	input_mt_sync_frame(ts->input_dev);
+#else
 	input_report_key(ts->input_dev, BTN_TOUCH, 0);
-#if !MT_PROTOCOL_B
 	input_mt_sync(ts->input_dev);
 #endif
 	input_sync(ts->input_dev);
@@ -2129,15 +2369,15 @@ static int32_t nvt_ts_resume(struct device *dev)
 
 	NVT_LOG("start\n");
 
-	// please make sure display reset(RESX) sequence and mipi dsi cmds sent before this
-#if NVT_TOUCH_SUPPORT_HW_RST
-	gpio_set_value(ts->reset_gpio, 1);
-#endif
-	if (nvt_update_firmware(BOOT_UPDATE_FIRMWARE_NAME)) {
-		NVT_ERR("download firmware failed, ignore check fw state\n");
-	} else {
-		nvt_check_fw_reset_state(RESET_STATE_REK);
-	}
+	/* evergo: suspend puts the controller into deep sleep (host command
+	 * 0x11) and nothing ever wakes it up again, so the old code here --
+	 * nvt_update_firmware() -- just timed out on a dead SPI bus, logged
+	 * "download firmware failed", and left the controller deaf: touch
+	 * stayed dead until the next reboot (screen off/on was enough to
+	 * trigger it).  Pulse TP_RST instead: the chip reboots from its own
+	 * flash straight into the application firmware, the same trick
+	 * Boot_Update_Firmware() uses after a download. */
+	nvt_reset_pulse();
 
 #if !WAKEUP_GESTURE
 	nvt_irq_enable(true);

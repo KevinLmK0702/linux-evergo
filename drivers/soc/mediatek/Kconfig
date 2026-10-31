@@ -89,4 +89,17 @@ config MTK_SOCINFO
 	  information about the SoC to the userspace including the
 	  manufacturer name, marketing name and soc name.
 
+config MTK_MT6833_CONN
+	tristate "MediaTek MT6833 integrated CONN subsystem"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on PM
+	depends on OF_RESERVED_MEM
+	help
+	  Say yes here to enable the driver for the integrated CONN subsystem
+	  of the MediaTek MT6833 (Dimensity 810).  This block contains the
+	  CONNSYS MCU, the WiFi/BT/GPS modem and the AP<->CONN mailboxes; the
+	  driver owns the power-up sequencing, ROM patch download and the MCU
+	  handshake needed before any WLAN or BT firmware can run.
+
 endmenu
+

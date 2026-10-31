@@ -23,6 +23,17 @@ config BT_MTK
 	tristate
 	select FW_LOADER
 
+config BT_MTK_BTIF
+	tristate "MediaTek BTIF serdev controller"
+	depends on SERIAL_DEV_BUS
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	help
+	  Say Y here to expose the MediaTek BTIF block as a serdev controller,
+	  so that an HCI transport such as btmtkuart can drive the Bluetooth
+	  core inside the SoC's integrated CONN subsystem.
+
+	  If unsure, say N.
+
 config BT_HCIBTUSB
 	tristate "HCI USB driver"
 	depends on USB

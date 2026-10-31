@@ -1,0 +1,2 @@
+obj-y += btmtk_stp.o
+ccflags-y += -DWMT_IDC_SUPPORT=0

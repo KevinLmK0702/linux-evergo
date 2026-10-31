@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# MediaTek vendor connectivity (WLAN/BT/FM/GPS) block.
+#
+# Only the WLAN part of the vendor "connectivity" tree is present in this
+# kernel; the Android WMT/conninfra glue it used to depend on has been
+# replaced by drivers/soc/mediatek/mt6833-conn.c.
+#
+menu "MediaTek connectivity"
+
+source "drivers/misc/mediatek/connectivity/Kconfig"
+
+endmenu

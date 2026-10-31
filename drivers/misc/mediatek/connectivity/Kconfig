@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Vendor "connectivity" tree, WLAN half only.
+#
+config MTK_GEN4M_WIFI
+	bool "MediaTek gen4m WLAN driver (MT6631 / SOC2_1X1, AXI)"
+	depends on ARCH_MEDIATEK
+	depends on OF
+	depends on CFG80211
+	select WIRELESS_EXT
+	select WEXT_CORE
+	select WEXT_PROC
+	select WEXT_SPY
+	help
+	  MediaTek gen4m WLAN driver, the vendor driver stack used for the
+	  WLAN core integrated in MT6833/MT6853 class SoCs (MT6631, driven as
+	  the "SOC2_1X1" chip family over the internal AXI bus).
+
+	  This is a bool rather than a tristate on purpose: the driver has to
+	  be built in, because the firmware it downloads is fetched before
+	  rootfs is available and there is no /lib/modules in the target
+	  rootfs.
+
+	  The Android WMT/conninfra glue normally used together with this
+	  driver is NOT built; CONN subsystem power-up and ROM-patch download
+	  are handled by drivers/soc/mediatek/mt6833-conn.c instead.
+
+	  Say Y if you are building for an MT6833 device that has the WLAN
+	  core integrated into the SoC.

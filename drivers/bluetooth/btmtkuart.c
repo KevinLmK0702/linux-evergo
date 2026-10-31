@@ -40,6 +40,13 @@
 #define BTMTKUART_REQUIRED_WAKEUP	4
 
 #define BTMTKUART_FLAG_STANDALONE_HW	 BIT(0)
+/*
+ * The Bluetooth core sits inside the SoC's CONN subsystem: the CONN driver
+ * has already powered it and loaded its ROM patch, and its MCU does not
+ * implement the MTK WMT vendor commands.  Sending them makes it assert, so
+ * the setup callback must stay away.
+ */
+#define BTMTKUART_FLAG_CONN_MANAGED	BIT(1)
 
 struct mtk_stp_hdr {
 	u8	prefix;
@@ -77,6 +84,10 @@ struct btmtkuart_dev {
 	u8	stp_pad[6];
 	u8	stp_cursor;
 	u16	stp_dlen;
+	u8	stp_hlen;
+	u8	stp_type;
+	bool	stp_drop;
+	u8	rx_dbg;
 
 	const struct btmtkuart_data *data;
 	struct hci_uart hu;
@@ -86,6 +97,8 @@ struct btmtkuart_dev {
 	((bdev)->data->flags & BTMTKUART_FLAG_STANDALONE_HW)
 #define btmtkuart_is_builtin_soc(bdev)	\
 	!((bdev)->data->flags & BTMTKUART_FLAG_STANDALONE_HW)
+#define btmtkuart_is_conn_managed(bdev)	\
+	((bdev)->data->flags & BTMTKUART_FLAG_CONN_MANAGED)
 
 static int mtk_hci_wmt_sync(struct hci_dev *hdev,
 			    struct btmtk_hci_wmt_params *wmt_params)
@@ -314,8 +327,6 @@ static const unsigned char *
 mtk_stp_split(struct btmtkuart_dev *bdev, const unsigned char *data, int count,
 	      int *sz_h4)
 {
-	struct mtk_stp_hdr *shdr;
-
 	/* The cursor is reset when all the data of STP is consumed out */
 	if (!bdev->stp_dlen && bdev->stp_cursor >= 6)
 		bdev->stp_cursor = 0;
@@ -330,15 +341,41 @@ mtk_stp_split(struct btmtkuart_dev *bdev, const unsigned char *data, int count,
 
 	/* Retrieve STP info and have a sanity check */
 	if (!bdev->stp_dlen && bdev->stp_cursor >= 6) {
-		shdr = (struct mtk_stp_hdr *)&bdev->stp_pad[2];
-		bdev->stp_dlen = be16_to_cpu(shdr->dlen) & 0x0fff;
+		/*
+		 * Two layouts are in the wild.  MT7622/MT7668 put two extra bytes
+		 * in front of the header, so its 0x80 prefix lands at stp_pad[2].
+		 * The CONN block of newer SoCs (MT6833) sends the header directly,
+		 * so 0x80 sits at stp_pad[0] and every field shifts down by two.
+		 */
+		if (bdev->stp_pad[0] == 0x80 && bdev->stp_pad[2] != 0x80) {
+			bdev->stp_type = (bdev->stp_pad[1] >> 4) & 0x7;
+			bdev->stp_dlen = ((bdev->stp_pad[1] & 0x0f) << 8) |
+					 bdev->stp_pad[2];
+			/*
+			 * Header is four bytes, so give back the two bytes we
+			 * over-read and restart the cursor at zero.
+			 */
+			data -= 2;
+			count += 2;
+			bdev->stp_cursor = 0;
+			bdev->stp_hlen = 4;
+			/* Only type 0 carries Bluetooth; type 4 is WMT. */
+			bdev->stp_drop = (bdev->stp_type != 0);
+		} else {
+			struct mtk_stp_hdr *shdr =
+				(struct mtk_stp_hdr *)&bdev->stp_pad[2];
 
-		/* Resync STP when unexpected data is being read */
-		if (shdr->prefix != 0x80 || bdev->stp_dlen > 2048) {
-			bt_dev_err(bdev->hdev, "stp format unexpected (%d, %d)",
-				   shdr->prefix, bdev->stp_dlen);
-			bdev->stp_cursor = 2;
-			bdev->stp_dlen = 0;
+			bdev->stp_dlen = be16_to_cpu(shdr->dlen) & 0x0fff;
+			bdev->stp_hlen = 6;
+			bdev->stp_drop = false;
+
+			/* Resync STP when unexpected data is being read */
+			if (shdr->prefix != 0x80 || bdev->stp_dlen > 2048) {
+				bt_dev_err(bdev->hdev, "stp format unexpected (%d, %d)",
+					   shdr->prefix, bdev->stp_dlen);
+				bdev->stp_cursor = 2;
+				bdev->stp_dlen = 0;
+			}
 		}
 	}
 
@@ -387,6 +424,21 @@ static void btmtkuart_recv(struct hci_dev *hdev, const u8 *data, size_t count)
 		sz_left -= adv;
 		p_left += adv;
 
+		/*
+		 * The CONN MCU multiplexes WMT (STP type 4) on the same link.
+		 * Feeding those frames to the H4 parser only yields -EILSEQ, so
+		 * consume and discard them instead.
+		 */
+		if (bdev->stp_drop) {
+			int skip = min_t(int, sz_left, sz_h4);
+
+			sz_left -= skip;
+			p_left += skip;
+			if (!bdev->stp_dlen)
+				bdev->stp_drop = false;
+			continue;
+		}
+
 		bdev->rx_skb = h4_recv_buf(&bdev->hu, bdev->rx_skb, p_h4,
 					   sz_h4, mtk_recv_pkts,
 					   ARRAY_SIZE(mtk_recv_pkts));
@@ -407,6 +459,18 @@ static size_t btmtkuart_receive_buf(struct serdev_device *serdev,
 				    const u8 *data, size_t count)
 {
 	struct btmtkuart_dev *bdev = serdev_device_get_drvdata(serdev);
+
+	/*
+	 * Bring-up aid: show the first few bursts exactly as they leave BTIF,
+	 * before any STP handling, so the on-wire layout can be compared with
+	 * what mtk_stp_split() assumes.
+	 */
+	if (bdev->rx_dbg < 6) {
+		int n = min_t(size_t, count, 24);
+
+		bdev->rx_dbg++;
+		bt_dev_info(bdev->hdev, "RX[%zu]: %*phN", count, n, data);
+	}
 
 	btmtkuart_recv(bdev->hdev, data, count);
 
@@ -617,6 +681,23 @@ static int btmtkuart_setup(struct hci_dev *hdev)
 
 	calltime = ktime_get();
 
+	/*
+	 * The CONN driver owns power-up and firmware loading for the integrated
+	 * Bluetooth core, and its MCU asserts on the WMT vendor opcodes below.
+	 */
+	if (btmtkuart_is_conn_managed(bdev)) {
+		bt_dev_info(hdev, "setup skipped (CONN-managed core)\n");
+		return 0;
+	}
+	/*
+	 * The CONN driver owns power-up and firmware loading for the integrated
+	 * Bluetooth core, and its MCU asserts on the WMT vendor opcodes below.
+	 * Nothing to do here.
+	 */
+	if (btmtkuart_is_conn_managed(bdev)) {
+		bt_dev_info(hdev, "setup skipped (CONN-managed core)\n");
+		return 0;
+	}
 	/* Wakeup MCUSYS is required for certain devices before we start to
 	 * do any setups.
 	 */
@@ -988,11 +1069,22 @@ static const struct btmtkuart_data mt7668_data __maybe_unused = {
 	.fwname = FIRMWARE_MT7668,
 };
 
+/*
+ * MT6833 keeps its Bluetooth core inside the integrated CONN subsystem, so
+ * there is no standalone power/clock to manage here: the CONN driver has
+ * already powered the block and loaded the BT ROM patch.  Only the HCI
+ * transport is left to this driver.
+ */
+static const struct btmtkuart_data mt6833_data __maybe_unused = {
+	.flags = BTMTKUART_FLAG_CONN_MANAGED,
+};
+
 #ifdef CONFIG_OF
 static const struct of_device_id mtk_of_match_table[] = {
 	{ .compatible = "mediatek,mt7622-bluetooth", .data = &mt7622_data},
 	{ .compatible = "mediatek,mt7663u-bluetooth", .data = &mt7663_data},
 	{ .compatible = "mediatek,mt7668u-bluetooth", .data = &mt7668_data},
+	{ .compatible = "mediatek,mt6833-bluetooth", .data = &mt6833_data},
 	{ }
 };
 MODULE_DEVICE_TABLE(of, mtk_of_match_table);

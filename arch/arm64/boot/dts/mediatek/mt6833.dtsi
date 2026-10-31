@@ -286,6 +286,94 @@
 			#clock-cells = <1>;
 		};
 
+		/* MediaTek integrated CONN subsystem (WiFi + BT, not a discrete chip).
+		 *
+		 * The reg windows overlap blocks already claimed above (infracfg_ao,
+		 * pericfg, scpsys, the watchdog), so a driver for this node must use
+		 * of_iomap()/ioremap() rather than devm_ioremap_resource(), or it fails
+		 * with -EBUSY.  The vendor driver already does raw ioremap.
+		 */
+		consys: consys@18002000 {
+			compatible = "mediatek,mt6833-consys";
+			reg = <0 0x18002000 0 0x1000>,	/* CONN_ON: PMU / top control  */
+			      <0 0x10007000 0 0x100>,	/* TOPRGU                      */
+			      <0 0x10001000 0 0x1000>,	/* INFRA_AO: bus protect       */
+			      <0 0x10006000 0 0x1000>,	/* SPM: MTCMOS control         */
+			      <0 0x18007000 0 0x1000>,	/* CONN_OFF: sleep / WFSYS     */
+			      <0 0x180b1000 0 0x1000>,	/* CONN_MCU_CONFG              */
+			      <0 0x180a3000 0 0x1000>,	/* CONN_MCU_CR: clock/EMI      */
+			      <0 0x180a5000 0 0x800>,	/* CONN_MCU_PDA                */
+			      <0 0x180c1000 0 0x1000>,	/* CONN_MCU_DBG                */
+			      <0 0x18004000 0 0x1000>,	/* CONN_MCU_EMI                */
+			      <0 0x1024c000 0 0x40>,	/* AP_CCIF4 mailbox            */
+			      <0 0x10003000 0 0x1000>;	/* PERICFG                     */
+			interrupts = <GIC_SPI 378 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 79  IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 379 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&infracfg_ao CLK_IFRAO_PMIC_CONN>,
+				 <&infracfg_ao CLK_IFRAO_CCIF4_AP>;
+			clock-names = "conn", "ccif";
+			/*
+			 * No power-domains here on purpose.  The scpsys provider at
+			 * 10006000.syscon never finishes probing on this board, so
+			 * binding to <&spm MT6833_POWER_DOMAIN_CONN> makes this device
+			 * defer forever (supplier not ready) and wmt_drv then waits
+			 * for a probe that never comes.
+			 *
+			 * consys_hw_power_ctrl() drives the SPM MTCMOS block directly
+			 * instead: that is what the hand-written bring-up used before
+			 * and what the vendor does on platforms without the genpd API.
+			 */
+			mediatek,probe-selftest;
+			memory-region = <&consys_reserved>;
+                        /*
+                         * wmt_drv's mt6833.c calls regulator_get() -- not the
+                         * _optional variant -- for all five rails, so they have
+                         * to be described here: a missing supply yields an
+                         * ERR_PTR and the following regulator_set_voltage()
+                         * would be handed a bogus pointer.
+                         */
+                        vcn18-supply = <&mt6359_vcn18_ldo_reg>;
+                        vcn13-supply = <&mt6359_vcn13_ldo_reg>;
+                        vcn33_1_bt-supply = <&mt6359_vcn33_1_ldo_reg>;
+                        vcn33_1_wifi-supply = <&mt6359_vcn33_1_ldo_reg>;
+                        vcn33_2_wifi-supply = <&mt6359_vcn33_2_ldo_reg>;
+                        status = "okay";
+                };
+
+		wifi: wifi@18000000 {
+			compatible = "mediatek,wifi";
+			reg = <0 0x18000000 0 0x100000>;
+			interrupts = <GIC_SPI 377 IRQ_TYPE_LEVEL_HIGH>;
+			memory-region = <&wifi_reserved>;
+			status = "okay";
+		};
+
+		btif: btif@1100c000 {
+			compatible = "mediatek,btif";
+			reg = <0 0x1100c000 0 0x1000>,	/* BTIF FIFO / control */
+			      <0 0x10217d80 0 0x80>,	/* APDMA TX channel    */
+			      <0 0x10217e00 0 0x80>;	/* APDMA RX channel    */
+			interrupts = <GIC_SPI 158 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 152 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 153 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&infracfg_ao CLK_IFRAO_BTIF>,
+				 <&infracfg_ao CLK_IFRAO_AP_DMA>;
+			clock-names = "btifc", "apdmac";
+			status = "okay";
+
+			/*
+			 * HCI transport for the BT core inside the CONN subsystem.
+			 * btmtkuart's builtin-soc path requires a "ref" clock; the
+			 * BT core runs off the SoC 26 MHz reference.
+			 */
+			bluetooth {
+				compatible = "mediatek,mt6833-bluetooth";
+				clocks = <&clk26m>;
+				clock-names = "ref";
+			};
+		};
+
 		scpsys: syscon@10006000 {
 			compatible = "mediatek,mt6833-scpsys", "syscon", "simple-mfd";
 			reg = <0 0x10006000 0 0x1000>;
@@ -295,6 +383,14 @@
 				#address-cells = <1>;
 				#size-cells = <0>;
 				#power-domain-cells = <1>;
+
+				conn: power-domain@MT6833_POWER_DOMAIN_CONN {
+					reg = <MT6833_POWER_DOMAIN_CONN>;
+					clocks = <&infracfg_ao CLK_IFRAO_PMIC_CONN>;
+					clock-names = "conn";
+					mediatek,infracfg = <&infracfg_ao>;
+					#power-domain-cells = <0>;
+				};
 
 				mfg0: power-domain@MT6833_POWER_DOMAIN_MFG0 {
 					reg = <MT6833_POWER_DOMAIN_MFG0>;

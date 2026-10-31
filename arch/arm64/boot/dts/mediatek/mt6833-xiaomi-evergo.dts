@@ -81,6 +81,31 @@
 		#size-cells = <2>;
 		ranges;
 
+		/* CONN reserved memory, same shape as the vendor DTB.  Dynamic regions,
+		 * so matched by size/alignment/alloc-ranges; 16 MB alignment makes the
+		 * placement stable across boots.
+		 */
+		consys_reserved: consys-reserve-memory {
+			compatible = "mediatek,consys-reserve-memory";
+			no-map;
+			size = <0 0x500000>;
+			alignment = <0 0x1000000>;
+			alloc-ranges = <0 0x40000000 0 0x80000000>;
+		};
+
+		/* The WiFi firmware body, its HIF rings and the CONN patches all live in
+		 * the one window the MCU reads; the driver also needs dma ops
+		 * ("shared-dma-pool") and a 'size' property, so this node deliberately
+		 * overlaps consys_reserved.
+		 */
+		wifi_reserved: wifi-reserve-memory {
+			compatible = "shared-dma-pool";
+			no-map;
+			size = <0 0x600000>;
+			alignment = <0 0x1000000>;
+			alloc-ranges = <0 0x40000000 0 0x80000000>;
+		};
+
 		dpm_reserved: memory@ffe60000 {
 			reg = <0 0xffe60000 0 0x190000>;
 			no-map;

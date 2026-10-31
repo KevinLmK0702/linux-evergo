@@ -49,6 +49,25 @@ static enum scpsys_bus_prot_block scpsys_bus_prot_blocks_mt6833[] = {
 };
 
 static const struct scpsys_domain_data scpsys_domain_data_mt6833[] = {
+	/*
+	 * Connectivity (CONSYS + MT6631 A-die).  The vendor clk-mt6833-pg.c
+	 * drives it as SYS_CONN; the SPM layout (control 0x0304, status bit 1)
+	 * is the same as MT8192's.  No bus protection is described: the INFRA
+	 * TOPAXI guards for the CONN ports come up already open from the
+	 * bootloader, and wmt_drv only needs the power gate itself.
+	 *
+	 * KEEP_DEFAULT_OFF so genpd leaves it off until wmt_drv asks for it.
+	 */
+	[MT6833_POWER_DOMAIN_CONN] = {
+		.name = "conn",
+		.sta_mask = BIT(1),
+		.ctl_offs = 0x0304,
+		.pwr_sta_offs = MT6833_PWR_STA_OFFSET,
+		.pwr_sta2nd_offs = MT6833_PWR_STA2ND_OFFSET,
+		.sram_pdn_bits = 0,
+		.sram_pdn_ack_bits = 0,
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
+	},
 	[MT6833_POWER_DOMAIN_MFG0] = {
 		.name = "mfg0",
 		.sta_mask = BIT(2),

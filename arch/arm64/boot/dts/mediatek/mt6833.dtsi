@@ -384,13 +384,16 @@
 				#size-cells = <0>;
 				#power-domain-cells = <1>;
 
-				conn: power-domain@MT6833_POWER_DOMAIN_CONN {
-					reg = <MT6833_POWER_DOMAIN_CONN>;
-					clocks = <&infracfg_ao CLK_IFRAO_PMIC_CONN>;
-					clock-names = "conn";
-					mediatek,infracfg = <&infracfg_ao>;
-					#power-domain-cells = <0>;
-				};
+				/*
+				 * No CONN domain here on purpose.  An earlier revision
+				 * described one so consys could bind through genpd, but
+				 * the SPM block reports no clock for it, which made
+				 * mtk-power-controller fail its own probe
+				 * ("power-domain@1: failed to get clk at index 0") and
+				 * took MFG0..MFG3 down with it -- the GPU then deferred
+				 * forever and no compositor could start.  consys drives
+				 * the CONN MTCMOS bits directly instead.
+				 */
 
 				mfg0: power-domain@MT6833_POWER_DOMAIN_MFG0 {
 					reg = <MT6833_POWER_DOMAIN_MFG0>;

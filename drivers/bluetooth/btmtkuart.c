@@ -30,6 +30,18 @@
 #include "hci_uart.h"
 #include "btmtk.h"
 
+#if IS_ENABLED(CONFIG_MTK_GEN4M_WIFI)
+/*
+ * Exported by the WMT stack.  Declared by hand because including its headers
+ * here would drag the whole vendor connectivity tree into drivers/bluetooth.
+ * ENUM_WMTDRV_TYPE_T is an int-sized enum, and BT happens to be its first
+ * member.
+ */
+extern int mtk_wcn_wmt_func_on(int type);
+extern int mtk_wcn_wmt_func_off(int type);
+#define BTMTKUART_WMT_DRV_TYPE_BT	0
+#endif
+
 #define VERSION "0.2"
 
 #define MTK_STP_TLR_SIZE	2
@@ -683,19 +695,23 @@ static int btmtkuart_setup(struct hci_dev *hdev)
 
 	/*
 	 * The CONN driver owns power-up and firmware loading for the integrated
-	 * Bluetooth core, and its MCU asserts on the WMT vendor opcodes below.
+	 * Bluetooth core, and its MCU asserts on the WMT vendor opcodes below,
+	 * so skip all of them.  Somebody still has to ask the WMT stack to bring
+	 * the core up though: hci0 is registered at ~0.2 s, long before the WMT
+	 * stack has probed, and only this callback runs late enough -- it fires
+	 * on the first hci_dev_open(), i.e. when userspace runs "hciconfig
+	 * hci0 up" or starts bluetoothd.
 	 */
 	if (btmtkuart_is_conn_managed(bdev)) {
+#if IS_ENABLED(CONFIG_MTK_GEN4M_WIFI)
+		if (!mtk_wcn_wmt_func_on(BTMTKUART_WMT_DRV_TYPE_BT)) {
+			bt_dev_err(hdev, "WMT refused to power the BT core on");
+			return -EIO;
+		}
+		bt_dev_info(hdev, "CONN-managed BT core powered on\n");
+#else
 		bt_dev_info(hdev, "setup skipped (CONN-managed core)\n");
-		return 0;
-	}
-	/*
-	 * The CONN driver owns power-up and firmware loading for the integrated
-	 * Bluetooth core, and its MCU asserts on the WMT vendor opcodes below.
-	 * Nothing to do here.
-	 */
-	if (btmtkuart_is_conn_managed(bdev)) {
-		bt_dev_info(hdev, "setup skipped (CONN-managed core)\n");
+#endif
 		return 0;
 	}
 	/* Wakeup MCUSYS is required for certain devices before we start to

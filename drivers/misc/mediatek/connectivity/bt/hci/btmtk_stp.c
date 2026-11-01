@@ -11,6 +11,7 @@
 #include <linux/skbuff.h>
 #include <linux/workqueue.h>
 #include <linux/unaligned.h>
+#include <linux/firmware.h>
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
 
@@ -265,18 +266,43 @@ static int btmtk_stp_set_bdaddr(struct hci_dev *hdev, const bdaddr_t *bdaddr)
 	return 0;
 }
 
+/*
+ * The device-unique address lives in the vendor nvdata partition, in
+ * APCFG/APRDEB/BT_Addr: six bytes, most significant first.  init copies
+ * that file into the firmware directory before switch_root, so it is
+ * available to the driver here.  The bdaddr= module parameter stays as
+ * a fallback for bench testing on a board without nvdata.
+ */
+#define BTMTK_STP_BDADDR_FW     "mediatek/mt6833/BT_Addr"
+
 static int btmtk_stp_setup(struct hci_dev *hdev)
 {
-	bdaddr_t ba;
-	u8 b[6];
-	int i;
+        const struct firmware *fw;
+        bdaddr_t ba;
+        u8 b[6];
+        int i;
 
-	if (!bdaddr || sscanf(bdaddr, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
-			      &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6) {
-		bt_dev_warn(hdev, "no bdaddr= given, address left unconfigured");
-		hci_set_quirk(hdev, HCI_QUIRK_INVALID_BDADDR);
-		return 0;
-	}
+        if (request_firmware(&fw, BTMTK_STP_BDADDR_FW, &hdev->dev) == 0) {
+                if (fw->size >= sizeof(b)) {
+                        memcpy(b, fw->data, sizeof(b));
+                        release_firmware(fw);
+                        bt_dev_info(hdev, "bdaddr taken from %s\n",
+                                    BTMTK_STP_BDADDR_FW);
+                        goto have_addr;
+                }
+                bt_dev_warn(hdev, "%s is %zu bytes, need %zu\n",
+                            BTMTK_STP_BDADDR_FW, fw->size, sizeof(b));
+                release_firmware(fw);
+        }
+
+        if (!bdaddr || sscanf(bdaddr, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+                              &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6) {
+                bt_dev_warn(hdev, "no bdaddr available, address left unconfigured\n");
+                hci_set_quirk(hdev, HCI_QUIRK_INVALID_BDADDR);
+                return 0;
+        }
+
+have_addr:
 	for (i = 0; i < 6; i++)
 		ba.b[i] = b[5 - i];
 	return btmtk_stp_set_bdaddr(hdev, &ba);

@@ -595,6 +595,36 @@
 	 */
 	mali-supply = <&mt6359_vproc1_buck_reg>;
 	sram-supply = <&mt6359_vsram_md_ldo_reg>;
+	operating-points-v2 = <&gpu_opp_table>;
+};
+
+/*
+ * GPU OPP table: the vendor voltages rely on EEMG calibration, which mainline
+ * does not do.  Running them uncalibrated makes panfrost fault (JOB_READ_FAULT,
+ * AS1 translation faults, job timeouts) and compositors fall back to software
+ * rendering.  The a22x-mainline port of the same MT6833 found a fixed 0.78125 V
+ * core rail plus 0.85 V GPU SRAM clean on every boot, so use that for all OPPs.
+ */
+&{/} {
+	gpu_opp_table: opp-table-gpu {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		opp-390000000 { opp-hz = /bits/ 64 <390000000>; opp-microvolt = <781250>; };
+		opp-467000000 { opp-hz = /bits/ 64 <467000000>; opp-microvolt = <781250>; };
+		opp-545000000 { opp-hz = /bits/ 64 <545000000>; opp-microvolt = <781250>; };
+		opp-622000000 { opp-hz = /bits/ 64 <622000000>; opp-microvolt = <781250>; };
+		opp-700000000 { opp-hz = /bits/ 64 <700000000>; opp-microvolt = <781250>; };
+		opp-790000000 { opp-hz = /bits/ 64 <790000000>; opp-microvolt = <781250>; };
+		opp-880000000 { opp-hz = /bits/ 64 <880000000>; opp-microvolt = <781250>; };
+		opp-955000000 { opp-hz = /bits/ 64 <955000000>; opp-microvolt = <781250>; };
+	};
+};
+
+/* GPU SRAM rail: fixed 0.85 V (see the OPP comment above). */
+&mt6359_vsram_md_ldo_reg {
+	regulator-min-microvolt = <850000>;
+	regulator-max-microvolt = <850000>;
 };
 
 /*

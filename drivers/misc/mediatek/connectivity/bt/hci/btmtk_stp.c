@@ -335,21 +335,38 @@ static int btmtk_stp_post_init(struct hci_dev *hdev)
 	return err;
 }
 
-static int __init btmtk_stp_init(void)
+static struct delayed_work btmtk_stp_register_work;
+static unsigned int btmtk_stp_register_tries;
+
+static void btmtk_stp_register(struct work_struct *work)
 {
 	struct btmtk_stp *bt;
 	struct hci_dev *hdev;
 	int err;
 
+	/*
+	 * hci_register_dev() powers the controller on immediately, and the setup
+	 * callback then asks WMT for the BT core.  This driver is a built-in
+	 * initcall, but the WMT stack probes seconds later, so registering at
+	 * init time makes the first power-on fail ("WMT failed to power on BT")
+	 * and leaves BlueZ without a usable controller.  Wait for STP/WMT.
+	 */
+	if (mtk_wcn_stp_is_ready() == MTK_WCN_BOOL_FALSE) {
+		if (++btmtk_stp_register_tries < 30)
+			schedule_delayed_work(&btmtk_stp_register_work,
+					      msecs_to_jiffies(2000));
+		return;
+	}
+
 	bt = kzalloc(sizeof(*bt), GFP_KERNEL);
 	if (!bt)
-		return -ENOMEM;
+		return;
 	INIT_WORK(&bt->rx_work, btmtk_stp_rx_work);
 
 	hdev = hci_alloc_dev();
 	if (!hdev) {
 		kfree(bt);
-		return -ENOMEM;
+		return;
 	}
 	bt->hdev = hdev;
 	hdev->bus = HCI_SDIO;	/* on-SoC, closest match */
@@ -370,8 +387,15 @@ static int __init btmtk_stp_init(void)
 		g_bt = NULL;
 		hci_free_dev(hdev);
 		kfree(bt);
-		return err;
 	}
+}
+
+static int __init btmtk_stp_init(void)
+{
+	INIT_DELAYED_WORK(&btmtk_stp_register_work, btmtk_stp_register);
+	/* WMT comes up ~5-7 s into boot; leave margin for the rootfs to be
+	 * mounted as well, because the setup callback reads BT_Addr from it. */
+	schedule_delayed_work(&btmtk_stp_register_work, msecs_to_jiffies(12000));
 	return 0;
 }
 
@@ -379,6 +403,9 @@ static void __exit btmtk_stp_exit(void)
 {
 	struct btmtk_stp *bt = g_bt;
 
+	cancel_delayed_work_sync(&btmtk_stp_register_work);
+	if (!bt)
+		return;
 	hci_unregister_dev(bt->hdev);
 	g_bt = NULL;
 	hci_free_dev(bt->hdev);

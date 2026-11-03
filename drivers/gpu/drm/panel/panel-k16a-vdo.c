@@ -39,6 +39,7 @@ struct k16a;
 struct k16a_desc {
 	const char *name;
 	const struct drm_display_mode *mode;
+	const struct drm_display_mode *mode_high;
 	void (*init)(struct k16a *ctx);
 };
 
@@ -113,8 +114,49 @@ static const struct drm_display_mode k16a_42_mode = {
 	.vtotal = 3710,
 };
 
+static const struct drm_display_mode k16a_36_mode_90 = {
+	.clock = 303708,
+	.hdisplay = 1080,
+	.hsync_start = 1308,
+	.hsync_end = 1328,
+	.htotal = 1364,
+	.vdisplay = 2400,
+	.vsync_start = 2454,
+	.vsync_end = 2458,
+	.vtotal = 2474,
+};
+
+static const struct drm_display_mode k16a_42_mode_90 = {
+	.clock = 303708,
+	.hdisplay = 1080,
+	.hsync_start = 1308,
+	.hsync_end = 1328,
+	.htotal = 1364,
+	.vdisplay = 2400,
+	.vsync_start = 2454,
+	.vsync_end = 2462,
+	.vtotal = 2474,
+};
+
+/*
+ * Panel frame-rate register: page 0x25 / 0x18 is 0x20 for 90 Hz and 0x21
+ * for 60 Hz (vendor tianma_panel_init()).  Program it before the rest of the
+ * init sequence; the DSI video timing itself comes from the DRM mode.
+ */
+static void k16a_select_fps(struct k16a *ctx)
+{
+	u8 page[] = { 0xff, 0x25 };
+	u8 unlock[] = { 0xfb, 0x01 };
+	u8 fps[] = { 0x18, 0x20 };
+
+	k16a_dcs_write(ctx, page, sizeof(page));
+	k16a_dcs_write(ctx, unlock, sizeof(unlock));
+	k16a_dcs_write(ctx, fps, sizeof(fps));
+}
+
 static void k16a_36_init(struct k16a *ctx)
 {
+	k16a_select_fps(ctx);
 	K16A_DCS(ctx, 0xff, 0x10);
 	K16A_DCS(ctx, 0xfb, 0x01);
 	K16A_DCS(ctx, 0x3b, 0x03, 0x14, 0x36, 0x04, 0x04);
@@ -152,6 +194,7 @@ static void k16a_36_init(struct k16a *ctx)
 
 static void k16a_42_init(struct k16a *ctx)
 {
+	k16a_select_fps(ctx);
 	K16A_DCS(ctx, 0xff, 0x10);
 	K16A_DCS(ctx, 0xfb, 0x01);
 	K16A_DCS(ctx, 0xc0, 0x00);
@@ -183,12 +226,14 @@ static void k16a_42_init(struct k16a *ctx)
 static const struct k16a_desc k16a_36_desc = {
 	.name = "k16a_36_02_0a_vdo",
 	.mode = &k16a_36_mode,
+	.mode_high = &k16a_36_mode_90,
 	.init = k16a_36_init,
 };
 
 static const struct k16a_desc k16a_42_desc = {
 	.name = "k16a_42_02_0b_vdo",
 	.mode = &k16a_42_mode,
+	.mode_high = &k16a_42_mode_90,
 	.init = k16a_42_init,
 };
 
@@ -212,9 +257,7 @@ static int k16a_prepare(struct drm_panel *panel)
 	struct k16a *ctx = to_k16a(panel);
 	int ret;
 
-	dev_info(ctx->dev, "k16a: prepare (in)\n");
 	if (ctx->prepared) {
-		dev_info(ctx->dev, "k16a: prepare (already prepared)\n");
 		return 0;
 	}
 
@@ -256,7 +299,6 @@ static int k16a_prepare(struct drm_panel *panel)
 	K16A_DCS(ctx, MIPI_DCS_SET_DISPLAY_ON);
 
 	ctx->prepared = true;
-	dev_info(ctx->dev, "k16a: prepare (out)\n");
 
 	return 0;
 }
@@ -265,9 +307,7 @@ static int k16a_unprepare(struct drm_panel *panel)
 {
 	struct k16a *ctx = to_k16a(panel);
 
-	dev_info(ctx->dev, "k16a: unprepare (in)\n");
 	if (!ctx->prepared) {
-		dev_info(ctx->dev, "k16a: unprepare (not prepared)\n");
 		return 0;
 	}
 
@@ -291,7 +331,6 @@ static int k16a_unprepare(struct drm_panel *panel)
 		regulator_disable(ctx->dvdd);
 
 	ctx->prepared = false;
-	dev_info(ctx->dev, "k16a: unprepare (out)\n");
 
 	return 0;
 }
@@ -301,7 +340,6 @@ static int k16a_enable(struct drm_panel *panel)
 	struct k16a *ctx = to_k16a(panel);
 	int ret;
 
-	dev_info(ctx->dev, "k16a: enable (in)\n");
 	if (!ctx->backlight)
 		return 0;
 
@@ -310,7 +348,6 @@ static int k16a_enable(struct drm_panel *panel)
 		ctx->backlight->props.brightness = K16A_DEFAULT_BRIGHTNESS;
 
 	ret = backlight_enable(ctx->backlight);
-	dev_info(ctx->dev, "k16a: enable (out) ret=%d\n", ret);
 	return ret;
 }
 
@@ -319,12 +356,10 @@ static int k16a_disable(struct drm_panel *panel)
 	struct k16a *ctx = to_k16a(panel);
 	int ret;
 
-	dev_info(ctx->dev, "k16a: disable (in)\n");
 	if (!ctx->backlight)
 		return 0;
 
 	ret = backlight_disable(ctx->backlight);
-	dev_info(ctx->dev, "k16a: disable (out) ret=%d\n", ret);
 	return ret;
 }
 
@@ -332,13 +367,14 @@ static int k16a_get_modes(struct drm_panel *panel,
 			  struct drm_connector *connector)
 {
 	struct k16a *ctx = to_k16a(panel);
+	const struct drm_display_mode *src = ctx->desc->mode_high ?
+		ctx->desc->mode_high : ctx->desc->mode;
 	struct drm_display_mode *mode;
 
-	mode = drm_mode_duplicate(connector->dev, ctx->desc->mode);
+	mode = drm_mode_duplicate(connector->dev, src);
 	if (!mode) {
 		dev_err(ctx->dev, "failed to add mode %ux%u@%u\n",
-			ctx->desc->mode->hdisplay, ctx->desc->mode->vdisplay,
-			drm_mode_vrefresh(ctx->desc->mode));
+			src->hdisplay, src->vdisplay, drm_mode_vrefresh(src));
 		return -ENOMEM;
 	}
 

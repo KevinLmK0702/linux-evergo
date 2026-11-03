@@ -184,10 +184,6 @@ static irqreturn_t mtk_disp_ovl_irq_handler(int irq, void *dev_id)
 	writel(0x0, priv->regs + DISP_REG_OVL_INTSTA);
 
 	if (evergo_ovl_irq_count < 40)
-		pr_info("evergo: ovl irq#%u at %ums intsta_now=%08x en=%08x\n",
-			evergo_ovl_irq_count, jiffies_to_msecs(jiffies),
-			readl(priv->regs + DISP_REG_OVL_INTSTA),
-			readl(priv->regs + DISP_REG_OVL_EN));
 	evergo_ovl_irq_count++;
 
 	if (!priv->vblank_cb)

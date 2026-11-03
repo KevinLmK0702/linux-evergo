@@ -296,8 +296,6 @@ static void ddp_cmdq_cb(struct mbox_client *cl, void *mssg)
 	unsigned int i;
 	unsigned long flags;
 
-	dev_info(mtk_crtc->base.dev->dev, "evergo: cmdq cb sta=%d\n",
-		 data->sta);
 
 	/* release GCE HW usage and start autosuspend */
 	pm_runtime_mark_last_busy(cmdq_cl->chan->mbox->dev);
@@ -454,8 +452,6 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 
 			if (!evergo_sof_logged) {
 				evergo_sof_logged = true;
-				dev_info(mtk_crtc->mmsys_dev,
-					 "evergo: mutex SOF forced to SINGLE mode\n");
 			}
 		}
 	}
@@ -563,7 +559,7 @@ static void evergo_kick_worker(struct work_struct *work)
 	struct mtk_crtc *mtk_crtc = evergo_kick_crtc;
 	int j;
 
-	if (!mtk_crtc || !mtk_crtc->enabled)
+	if (!mtk_crtc || !mtk_crtc->enabled || !mtk_crtc->base.state)
 		return;
 
 	/*
@@ -592,7 +588,6 @@ static void evergo_kick_worker(struct work_struct *work)
 	mutex_unlock(&mtk_crtc->hw_lock);
 
 	count++;
-	dev_info(mtk_crtc->mmsys_dev, "evergo: periodic re-init #%u\n", count);
 
 	if (count < 10)
 		schedule_delayed_work(&evergo_kick_work,
@@ -603,10 +598,19 @@ static void mtk_crtc_ddp_config(struct drm_crtc *crtc,
 				struct cmdq_pkt *cmdq_handle)
 {
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
-	struct mtk_crtc_state *state = to_mtk_crtc_state(mtk_crtc->base.state);
+	struct mtk_crtc_state *state;
 	struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[0];
 	unsigned int i;
 	unsigned int local_layer;
+
+	/* No state has been installed yet (first atomic commit pending, or the
+	 * crtc was torn down): there is nothing to program, and touching
+	 * state->pending_* would fault on a NULL pointer.  This is reachable
+	 * from mtk_crtc_ddp_irq() and the evergo periodic kick worker.
+	 */
+	if (!crtc->state)
+		return;
+	state = to_mtk_crtc_state(mtk_crtc->base.state);
 
 	/*
 	 * TODO: instead of updating the registers here, we should prepare
@@ -738,8 +742,6 @@ static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
 
 		if (!evergo_logged) {
 			evergo_logged = true;
-			dev_info(crtc->dev->dev,
-				 "evergo: CPU config from flush (no cmdq)\n");
 		}
 		mtk_crtc_ddp_config(crtc, NULL);
 
@@ -768,8 +770,6 @@ static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
 						mtk_ddp_comp_start(comp);
 					}
 				}
-				dev_info(crtc->dev->dev,
-					 "evergo: display comps re-kicked\n");
 				evergo_kick_crtc = mtk_crtc;
 				INIT_DELAYED_WORK(&evergo_kick_work, evergo_kick_worker);
 				if (!evergo_keep_lk_disp)
@@ -826,6 +826,12 @@ static void mtk_crtc_ddp_irq(void *data)
 	struct drm_crtc *crtc = data;
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
 	struct mtk_drm_private *priv = crtc->dev->dev_private;
+
+	/* Spurious/leftover interrupts arrive before the first commit enables
+	 * the pipeline; mtk_crtc_ddp_config() has no state to program yet.
+	 */
+	if (!mtk_crtc->enabled || !crtc->state)
+		return;
 
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	struct drm_device *dev = mtk_crtc->base.dev;

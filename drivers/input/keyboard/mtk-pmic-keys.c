@@ -388,8 +388,10 @@ static int mtk_pmic_keys_probe(struct platform_device *pdev)
 			return error;
 		}
 
-		if (of_property_read_bool(child, "wakeup-source"))
+		if (of_property_read_bool(child, "wakeup-source")) {
 			keys->keys[index].wakeup = true;
+			device_init_wakeup(&pdev->dev, true);
+		}
 
 		error = mtk_pmic_key_setup(keys, &keys->keys[index]);
 		if (error)

@@ -14,11 +14,11 @@
 
 /dts-v1/;
 
+#include <dt-bindings/clock/mediatek,mt6833-clk.h>
+#include <dt-bindings/power/mediatek,mt6833-power.h>
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/interrupt-controller/irq.h>
-#include <dt-bindings/clock/mediatek,mt6833-clk.h>
-#include <dt-bindings/power/mediatek,mt6833-power.h>
 #include <dt-bindings/iio/adc/mediatek,mt6359-auxadc.h>
 #include <dt-bindings/leds/common.h>
 #include <dt-bindings/pinctrl/mediatek,mt6833-pinfunc.h>
@@ -59,7 +59,7 @@
 		 *   KMS: DRM_IOCTL_MODE_CREATE_DUMB failed: Out of memory
 		 * 256 MB is comfortable on this 8 GiB unit.
 		 */
-		bootargs = "earlycon=mtk8250,0x11002000 console=evenring console=ttyS0,921600n8 console=tty0 loglevel=7 printk.devkmsg=on clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=10 softlockup_panic=1 watchdog_thresh=5 initcall_blacklist=exynos4_pm_init_power_domain fbcon=nodefer cma=256M";
+		bootargs = "earlycon=mtk8250,0x11002000 console=evenring console=ttyS0,921600n8 console=tty0 loglevel=4 printk.devkmsg=on clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=10 watchdog_thresh=30 initcall_blacklist=exynos4_pm_init_power_domain fbcon=nodefer cma=256M";
 		stdout-path = "serial0:921600n8";
 	};
 
@@ -70,7 +70,7 @@
 	 */
 	memory: memory@40000000 {
 		device_type = "memory";
-		reg = <0 0x40000000 2 0x00000000>;
+		reg = <0 0x40000000 0x1 0x80000000>;
 	};
 
 	/*
@@ -372,7 +372,7 @@
 	 * A CDC-ACM console at 115200 baud does not need more than 12 Mbps.
 	 */
 	dr_mode = "otg";
-	maximum-speed = "full-speed";
+	maximum-speed = "high-speed";
 };
 
 &u2phy {
@@ -566,7 +566,7 @@
 	 * progress.
 	 */
 	panel@0 {
-		compatible = "k16a_42_02_0b_vdo,lcm";
+		compatible = "k16a_36_02_0a_vdo,lcm";
 		reg = <0>;
 
 		backlight = <&lm36273>;
@@ -1054,18 +1054,6 @@
 	};
 };
 
-/* The AW8697 actuator is powered from the MT6359 VIBR LDO. */
-/*
- * The AW8697 actuator is powered from the MT6359 VIBR LDO.  The LRA boost
- * reports UVLO at 3.0 V, so use the regulator's top setting (3.3 V) - the
- * same rail the vendor sets up (vib_vol=9) before starting the motor.
- */
-&mt6359_vibr_ldo_reg {
-	regulator-min-microvolt = <3300000>;
-	regulator-max-microvolt = <3300000>;
-	regulator-always-on;
-};
-
 /*
  * Charger / PMIC: the MT6360 companion PMIC (charger + flash LED + ADC) and
  * the MT6359 fuel gauge.  The MT6360 bus is not described by the vendor DT
@@ -1132,6 +1120,21 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 		status = "okay";
+
+		/* AK09918 3-axis magnetometer (sensor hub cluster) */
+		magnetometer@c {
+			compatible = "asahi-kasei,ak09918";
+			reg = <0x0c>;
+			mount-matrix = "1", "0", "0",
+				       "0", "1", "0",
+				       "0", "0", "1";
+		};
+
+		/* TSL2522 ambient light sensor */
+		light-sensor@39 {
+			compatible = "amstaos,tsl2522";
+			reg = <0x39>;
+		};
 	};
 
 	i2c5: i2c@11e01000 {
@@ -1255,3 +1258,100 @@
 	};
 };
 
+/* The AW8697 actuator is powered from the MT6359 VIBR LDO. */
+/*
+ * The AW8697 actuator is powered from the MT6359 VIBR LDO.  The LRA boost
+ * reports UVLO at 3.0 V, so use the regulator's top setting (3.3 V) - the
+ * same rail the vendor sets up (vib_vol=9) before starting the motor.
+ */
+&mt6359_vibr_ldo_reg {
+	regulator-min-microvolt = <3300000>;
+	regulator-max-microvolt = <3300000>;
+	regulator-always-on;
+};
+
+/*
+ * Remaining i2c controllers from the vendor mt6833.dts.  These carry the
+ * sensor cluster (i2c1: magnetometer + light/proximity), the companion
+ * charger IC (i2c0) and the buses that need probing for the MT6360.
+ */
+&pio {
+	i2c2_pins: i2c2-pins {
+		pins-scl { pinmux = <PINMUX_GPIO101__FUNC_SCL2>; bias-pull-up; };
+		pins-sda { pinmux = <PINMUX_GPIO102__FUNC_SDA2>; bias-pull-up; };
+	};
+	i2c3_pins: i2c3-pins {
+		pins-scl { pinmux = <PINMUX_GPIO103__FUNC_SCL3>; bias-pull-up; };
+		pins-sda { pinmux = <PINMUX_GPIO104__FUNC_SDA3>; bias-pull-up; };
+	};
+	i2c4_pins: i2c4-pins {
+		pins-scl { pinmux = <PINMUX_GPIO105__FUNC_SCL4>; bias-pull-up; };
+		pins-sda { pinmux = <PINMUX_GPIO106__FUNC_SDA4>; bias-pull-up; };
+	};
+	i2c8_pins: i2c8-pins {
+		pins-scl { pinmux = <PINMUX_GPIO113__FUNC_SCL8>; bias-pull-up; };
+		pins-sda { pinmux = <PINMUX_GPIO114__FUNC_SDA8>; bias-pull-up; };
+	};
+};
+
+&soc {
+	i2c2: i2c@11d21000 {
+		compatible = "mediatek,mt6833-i2c";
+		reg = <0 0x11d21000 0 0x1000>, <0 0x10217180 0 0x180>;
+		interrupts = <GIC_SPI 114 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&imp_iic_wrap_ws CLK_IMPWS_AP_CLOCK_RO_I2C2>,
+			 <&infracfg_ao CLK_IFRAO_AP_DMA>;
+		clock-names = "main", "dma";
+		clock-div = <5>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c2_pins>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+	};
+
+	i2c3: i2c@11cb0000 {
+		compatible = "mediatek,mt6833-i2c";
+		reg = <0 0x11cb0000 0 0x1000>, <0 0x10217300 0 0x80>;
+		interrupts = <GIC_SPI 115 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&imp_iic_wrap_e CLK_IMPE_AP_CLOCK_RO_I2C3>,
+			 <&infracfg_ao CLK_IFRAO_AP_DMA>;
+		clock-names = "main", "dma";
+		clock-div = <5>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c3_pins>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+	};
+
+	i2c4: i2c@11d22000 {
+		compatible = "mediatek,mt6833-i2c";
+		reg = <0 0x11d22000 0 0x1000>, <0 0x10217380 0 0x180>;
+		interrupts = <GIC_SPI 116 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&imp_iic_wrap_ws CLK_IMPWS_AP_CLOCK_RO_I2C4>,
+			 <&infracfg_ao CLK_IFRAO_AP_DMA>;
+		clock-names = "main", "dma";
+		clock-div = <5>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c4_pins>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+	};
+
+	i2c8: i2c@11d00000 {
+		compatible = "mediatek,mt6833-i2c";
+		reg = <0 0x11d00000 0 0x1000>, <0 0x10217780 0 0x180>;
+		interrupts = <GIC_SPI 120 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&imp_iic_wrap_s CLK_IMPS_AP_CLOCK_RO_I2C8>,
+			 <&infracfg_ao CLK_IFRAO_AP_DMA>;
+		clock-names = "main", "dma";
+		clock-div = <5>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c8_pins>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+	};
+};

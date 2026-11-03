@@ -19,6 +19,8 @@
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/clock/mediatek,mt6833-clk.h>
 #include <dt-bindings/power/mediatek,mt6833-power.h>
+#include <dt-bindings/iio/adc/mediatek,mt6359-auxadc.h>
+#include <dt-bindings/leds/common.h>
 #include <dt-bindings/pinctrl/mediatek,mt6833-pinfunc.h>
 
 #include "mt6833.dtsi"
@@ -1062,5 +1064,194 @@
 	regulator-min-microvolt = <3300000>;
 	regulator-max-microvolt = <3300000>;
 	regulator-always-on;
+};
+
+/*
+ * Charger / PMIC: the MT6360 companion PMIC (charger + flash LED + ADC) and
+ * the MT6359 fuel gauge.  The MT6360 bus is not described by the vendor DT
+ * (its i2c client is created by the bootloader); the MT6833+MT6360 reference
+ * wiring puts it on i2c5 @0x34, which is also what the a22x port uses.
+ * The interrupt lines are GPIO10 (IRQB) and GPIO9 (PD_IRQB).
+ */
+&pio {
+	i2c0_pins: i2c0-pins {
+		pins-scl { pinmux = <PINMUX_GPIO97__FUNC_SCL0>; bias-pull-up; };
+		pins-sda { pinmux = <PINMUX_GPIO98__FUNC_SDA0>; bias-pull-up; };
+	};
+
+	i2c1_pins: i2c1-pins {
+		pins-scl { pinmux = <PINMUX_GPIO99__FUNC_SCL1>; bias-pull-up; };
+		pins-sda { pinmux = <PINMUX_GPIO100__FUNC_SDA1>; bias-pull-up; };
+	};
+
+	i2c5_pins: i2c5-pins {
+		pins-scl { pinmux = <PINMUX_GPIO107__FUNC_SCL5>; bias-pull-up; };
+		pins-sda { pinmux = <PINMUX_GPIO108__FUNC_SDA5>; bias-pull-up; };
+	};
+
+	i2c7_pins: i2c7-pins {
+		pins-scl { pinmux = <PINMUX_GPIO111__FUNC_SCL7>; bias-pull-up; };
+		pins-sda { pinmux = <PINMUX_GPIO112__FUNC_SDA7>; bias-pull-up; };
+	};
+
+	mt6360_int_pins: mt6360-int-pins {
+		pins-irq {
+			pinmux = <PINMUX_GPIO10__FUNC_GPIO10>;
+			input-enable;
+			bias-pull-up;
+		};
+	};
+};
+
+&soc {
+	i2c0: i2c@11e00000 {
+		compatible = "mediatek,mt6833-i2c";
+		reg = <0 0x11e00000 0 0x1000>, <0 0x10217080 0 0x80>;
+		interrupts = <GIC_SPI 112 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&imp_iic_wrap_w CLK_IMPW_AP_CLOCK_RO_I2C0>,
+			 <&infracfg_ao CLK_IFRAO_AP_DMA>;
+		clock-names = "main", "dma";
+		clock-div = <5>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c0_pins>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+	};
+
+	i2c1: i2c@11d20000 {
+		compatible = "mediatek,mt6833-i2c";
+		reg = <0 0x11d20000 0 0x1000>, <0 0x10217100 0 0x80>;
+		interrupts = <GIC_SPI 113 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&imp_iic_wrap_ws CLK_IMPWS_AP_CLOCK_RO_I2C1>,
+			 <&infracfg_ao CLK_IFRAO_AP_DMA>;
+		clock-names = "main", "dma";
+		clock-div = <5>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c1_pins>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+	};
+
+	i2c5: i2c@11e01000 {
+		compatible = "mediatek,mt6833-i2c";
+		reg = <0 0x11e01000 0 0x1000>, <0 0x10217500 0 0x80>;
+		interrupts = <GIC_SPI 117 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&imp_iic_wrap_w CLK_IMPW_AP_CLOCK_RO_I2C5>,
+			 <&infracfg_ao CLK_IFRAO_AP_DMA>;
+		clock-names = "main", "dma";
+		clock-div = <5>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c5_pins>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+
+		mt6360: pmic@34 {
+			compatible = "mediatek,mt6360";
+			reg = <0x34>;
+			interrupt-parent = <&pio>;
+			interrupts = <10 IRQ_TYPE_EDGE_FALLING>;
+			interrupt-names = "IRQB";
+			interrupt-controller;
+			#interrupt-cells = <1>;
+			wakeup-source;
+			pinctrl-names = "default";
+			pinctrl-0 = <&mt6360_int_pins>;
+
+			mt6360_adc: adc {
+				compatible = "mediatek,mt6360-adc";
+				#io-channel-cells = <1>;
+			};
+
+			mt6360_chg: charger {
+				compatible = "mediatek,mt6360-chg";
+				richtek,vinovp-microvolt = <6500000>;
+			};
+
+			led-controller {
+				compatible = "mediatek,mt6360-led";
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				led@4 {
+					reg = <4>;
+					function = LED_FUNCTION_FLASH;
+					color = <LED_COLOR_ID_WHITE>;
+					function-enumerator = <1>;
+					led-max-microamp = <100000>;
+					flash-max-microamp = <750000>;
+					flash-max-timeout-us = <1248000>;
+				};
+			};
+		};
+	};
+
+	i2c7: i2c@11e02000 {
+		compatible = "mediatek,mt6833-i2c";
+		reg = <0 0x11e02000 0 0x1000>, <0 0x10217600 0 0x180>;
+		interrupts = <GIC_SPI 119 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&imp_iic_wrap_w CLK_IMPW_AP_CLOCK_RO_I2C7>,
+			 <&infracfg_ao CLK_IFRAO_AP_DMA>;
+		clock-names = "main", "dma";
+		clock-div = <5>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c7_pins>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+	};
+};
+
+/ {
+	/*
+	 * S98016 cell, 4.45 V, 5000 mAh.  OCV table generated from the
+	 * vendor battery profile (bat_setting/battery_S98016_CWD_4V45_5000mah.dtsi,
+	 * battery0_profile_t0) with the coulomb counter following it.
+	 */
+	battery: battery {
+		compatible = "simple-battery";
+		charge-full-design-microamp-hours = <5000000>;
+		voltage-min-design-microvolt = <3400000>;
+		voltage-max-design-microvolt = <4450000>;
+		factory-internal-resistance-micro-ohms = <120000>;
+		ocv-capacity-celsius = <25>;
+		ocv-capacity-table-0 =
+				       <44150000 100>,
+				       <43684000 96>,
+				       <43242000 92>,
+				       <42772000 88>,
+				       <42279000 84>,
+				       <41792000 80>,
+				       <41322000 76>,
+				       <40868000 72>,
+				       <40441000 68>,
+				       <40060000 64>,
+				       <39671000 60>,
+				       <39135000 56>,
+				       <38821000 52>,
+				       <38575000 47>,
+				       <38363000 43>,
+				       <38178000 39>,
+				       <38027000 35>,
+				       <37869000 31>,
+				       <37582000 27>,
+				       <37377000 23>,
+				       <37185000 19>,
+				       <36924000 15>,
+				       <36792000 11>,
+				       <36489000 7>,
+				       <33988000 0>;
+	};
+
+	mt6359_fg: fuel-gauge {
+		compatible = "mediatek,mt6359-fuel-gauge";
+		mediatek,pmic = <&pmic>;
+		mediatek,sense-resistor-micro-ohms = <5000>;
+		io-channels = <&pmic_adc MT6359_AUXADC_VBAT>;
+		io-channel-names = "voltage";
+		monitored-battery = <&battery>;
+	};
 };
 

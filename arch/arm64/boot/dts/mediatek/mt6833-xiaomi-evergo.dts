@@ -641,3 +641,45 @@
 &mfg1 {
 	domain-supply = <&mt6359_vsram_md_ldo_reg>;
 };
+
+/*
+ * Hardware keys: the MT6359 PMIC provides KEY_POWER and (on this board) the
+ * volume-down button through its "home" key; volume-up is wired to the SoC
+ * keypad matrix (single key, KPCOL0/1), as on the a22x MT6833 port.
+ */
+&pmic {
+	keys {
+		compatible = "mediatek,mt6359-keys";
+
+		power-key {
+			linux,keycodes = <116>;		/* KEY_POWER */
+			wakeup-source;
+		};
+
+		home-key {
+			linux,keycodes = <114>;		/* KEY_VOLUMEDOWN */
+		};
+	};
+};
+
+/ {
+	keypad_clk: keypad-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <26000000>;
+	};
+
+	keypad@10010000 {
+		compatible = "mediatek,mt6833-keypad", "mediatek,mt6779-keypad";
+		reg = <0 0x10010000 0 0x1000>;
+		interrupts = <GIC_SPI 74 IRQ_TYPE_EDGE_RISING>;
+		clocks = <&keypad_clk>;
+		clock-names = "kpd";
+		linux,keymap = <0x00 0x01 115>;		/* KEY_VOLUMEUP */
+		keypad,num-rows = <1>;
+		keypad,num-columns = <2>;
+		debounce-delay-ms = <32>;
+		wakeup-source;
+	};
+};
+

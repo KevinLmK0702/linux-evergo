@@ -132,6 +132,27 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6833[] = {
 		.sram_pdn_bits = GENMASK(8, 8),
 		.sram_pdn_ack_bits = GENMASK(12, 12),
 	},
+	/*
+	 * Audio subsystem (AFE + audsys clocks).  Register layout from the
+	 * vendor clk-mt6833-pg.c: AUDIO_PWR_CON 0x0358, status bit 22,
+	 * SRAM PDN bit 8 / ack bit 12, INFRA TOPAXI PROTECTEN_2 bit 4.
+	 */
+	[MT6833_POWER_DOMAIN_AUDIO] = {
+		.name = "audio",
+		.sta_mask = BIT(22),
+		.ctl_offs = 0x0358,
+		.pwr_sta_offs = MT6833_PWR_STA_OFFSET,
+		.pwr_sta2nd_offs = MT6833_PWR_STA2ND_OFFSET,
+		.sram_pdn_bits = GENMASK(8, 8),
+		.sram_pdn_ack_bits = GENMASK(12, 12),
+		.bp_cfg = {
+			BUS_PROT_WR(INFRA,
+				    MT8192_TOP_AXI_PROT_EN_2_AUDIO,
+				    MT8192_TOP_AXI_PROT_EN_2_SET,
+				    MT8192_TOP_AXI_PROT_EN_2_CLR,
+				    MT8192_TOP_AXI_PROT_EN_2_STA1),
+		},
+	},
 };
 
 static const struct scpsys_soc_data mt6833_scpsys_data = {

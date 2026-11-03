@@ -17,6 +17,8 @@
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/clock/mediatek,mt6833-clk.h>
+#include <dt-bindings/power/mediatek,mt6833-power.h>
 #include <dt-bindings/pinctrl/mediatek,mt6833-pinfunc.h>
 
 #include "mt6833.dtsi"
@@ -680,6 +682,297 @@
 		keypad,num-columns = <2>;
 		debounce-delay-ms = <32>;
 		wakeup-source;
+	};
+};
+
+/*
+ * ---------------------------------------------------------------------
+ * Audio: MT6833 AFE (MT8192-compatible) + MT6359 codec + SIA8109 amp
+ * ---------------------------------------------------------------------
+ *
+ * Layout taken from the vendor evergo DTS (mt6833.dts / evergo.dts):
+ *  - MTKAIF link AFE <-> MT6359 on AUD_CLK_MOSI (GPIO152), AUD_SYNC_MOSI
+ *    (GPIO153), AUD_DAT_MOSI0/1 (GPIO154/155), AUD_DAT_MISO0/1
+ *    (GPIO159/160);
+ *  - the SIA8109 speaker amplifier hangs off the MT6359 line output and
+ *    is enabled/configured through its one-wire interface on GPIO131,
+ *    which the mainline aw8738 driver drives (mode 6, verified on the
+ *    same MT6359+SIA8109 combination on the a22x port).
+ *
+ * The AFE is a child of the audsys clock controller: the audsys driver
+ * populates its children (of_platform_populate), exactly like MT8192.
+ */
+&pio {
+	aud_clk_mosi_off: aud-clk-mosi-off {
+		pins-off {
+			pinmux = <PINMUX_GPIO152__FUNC_GPIO152>,
+				 <PINMUX_GPIO153__FUNC_GPIO153>;
+			input-enable;
+			bias-pull-down;
+		};
+	};
+
+	aud_clk_mosi_on: aud-clk-mosi-on {
+		pins-on {
+			pinmux = <PINMUX_GPIO152__FUNC_AUD_CLK_MOSI>,
+				 <PINMUX_GPIO153__FUNC_AUD_SYNC_MOSI>;
+			input-schmitt-enable;
+			bias-disable;
+		};
+	};
+
+	aud_dat_mosi_off: aud-dat-mosi-off {
+		pins-off {
+			pinmux = <PINMUX_GPIO154__FUNC_GPIO154>,
+				 <PINMUX_GPIO155__FUNC_GPIO155>;
+			input-enable;
+			bias-pull-down;
+		};
+	};
+
+	aud_dat_mosi_on: aud-dat-mosi-on {
+		pins-on {
+			pinmux = <PINMUX_GPIO154__FUNC_AUD_DAT_MOSI0>,
+				 <PINMUX_GPIO155__FUNC_AUD_DAT_MOSI1>;
+			input-schmitt-enable;
+			bias-disable;
+		};
+	};
+
+	aud_dat_miso_off: aud-dat-miso-off {
+		pins-off {
+			pinmux = <PINMUX_GPIO159__FUNC_GPIO159>,
+				 <PINMUX_GPIO160__FUNC_GPIO160>;
+			input-enable;
+			bias-pull-down;
+		};
+	};
+
+	aud_dat_miso_on: aud-dat-miso-on {
+		pins-on {
+			pinmux = <PINMUX_GPIO159__FUNC_AUD_DAT_MISO0>,
+				 <PINMUX_GPIO160__FUNC_AUD_DAT_MISO1>;
+			input-schmitt-enable;
+			bias-disable;
+		};
+	};
+
+	aud_gpio_i2s3_off: aud-gpio-i2s3-off {
+		pins-off {
+			pinmux = <PINMUX_GPIO40__FUNC_GPIO40>,
+				 <PINMUX_GPIO41__FUNC_GPIO41>,
+				 <PINMUX_GPIO43__FUNC_GPIO43>;
+			input-enable;
+			bias-pull-down;
+		};
+	};
+
+	aud_gpio_i2s3_on: aud-gpio-i2s3-on {
+		pins-on {
+			pinmux = <PINMUX_GPIO40__FUNC_I2S3_BCK>,
+				 <PINMUX_GPIO41__FUNC_I2S3_LRCK>,
+				 <PINMUX_GPIO43__FUNC_I2S3_DO>;
+			input-schmitt-enable;
+			bias-disable;
+		};
+	};
+
+	aud_gpio_i2s0_off: aud-gpio-i2s0-off {
+		pins-off {
+			pinmux = <PINMUX_GPIO42__FUNC_GPIO42>;
+			input-enable;
+			bias-pull-down;
+		};
+	};
+
+	aud_gpio_i2s0_on: aud-gpio-i2s0-on {
+		pins-on {
+			pinmux = <PINMUX_GPIO42__FUNC_I2S0_DI>;
+			input-schmitt-enable;
+			bias-disable;
+		};
+	};
+
+	/* SIA8109 one-wire (reset + OWI) line on GPIO131 */
+	spk_amp_pins: spk-amp-pins {
+		pins-owi {
+			pinmux = <PINMUX_GPIO131__FUNC_GPIO131>;
+			slew-rate = <1>;
+			bias-disable;
+		};
+	};
+};
+
+&audsys {
+	afe: audio-controller {
+		compatible = "mediatek,mt6833-audio";
+		interrupts = <GIC_SPI 202 IRQ_TYPE_LEVEL_HIGH>;
+		mediatek,apmixedsys = <&apmixedsys>;
+		mediatek,infracfg = <&infracfg_ao>;
+		mediatek,topckgen = <&topckgen>;
+		power-domains = <&spm MT6833_POWER_DOMAIN_AUDIO>;
+		clocks = <&audsys CLK_AUDSYS_AFE>,
+			 <&audsys CLK_AUDSYS_DAC>,
+			 <&audsys CLK_AUDSYS_DAC_PREDIS>,
+			 <&audsys CLK_AUDSYS_ADC>,
+			 <&audsys CLK_AUDSYS_ADDA6_ADC>,
+			 <&audsys CLK_AUDSYS_22M>,
+			 <&audsys CLK_AUDSYS_24M>,
+			 <&audsys CLK_AUDSYS_APLL_TUNER>,
+			 <&audsys CLK_AUDSYS_APLL2_TUNER>,
+			 <&audsys CLK_AUDSYS_TDM>,
+			 <&audsys CLK_AUDSYS_TML>,
+			 <&audsys CLK_AUDSYS_NLE>,
+			 <&audsys CLK_AUDSYS_DAC_HIRES>,
+			 <&audsys CLK_AUDSYS_ADC_HIRES>,
+			 <&audsys CLK_AUDSYS_ADC_HIRES_TML>,
+			 <&audsys CLK_AUDSYS_ADDA6_ADC_HIRES>,
+			 <&audsys CLK_AUDSYS_3RD_DAC>,
+			 <&audsys CLK_AUDSYS_3RD_DAC_PREDIS>,
+			 <&audsys CLK_AUDSYS_3RD_DAC_TML>,
+			 <&audsys CLK_AUDSYS_3RD_DAC_HIRES>,
+			 <&infracfg_ao CLK_IFRAO_AUDIO>,
+			 <&infracfg_ao CLK_IFRAO_AUDIO_26M_BCLK>,
+			 <&topckgen CLK_TOP_AUDIO_SEL>,
+			 <&topckgen CLK_TOP_AUD_INTBUS_SEL>,
+			 <&topckgen CLK_TOP_MAINPLL_D4_D4>,
+			 <&topckgen CLK_TOP_AUD_1_SEL>,
+			 <&topckgen CLK_TOP_APLL1>,
+			 <&topckgen CLK_TOP_AUD_2_SEL>,
+			 <&topckgen CLK_TOP_APLL2>,
+			 <&topckgen CLK_TOP_AUD_ENGEN1_SEL>,
+			 <&topckgen CLK_TOP_APLL1_D4>,
+			 <&topckgen CLK_TOP_AUD_ENGEN2_SEL>,
+			 <&topckgen CLK_TOP_APLL2_D4>,
+			 <&topckgen CLK_TOP_APLL_I2S0_MCK_SEL>,
+			 <&topckgen CLK_TOP_APLL_I2S1_MCK_SEL>,
+			 <&topckgen CLK_TOP_APLL_I2S2_MCK_SEL>,
+			 <&topckgen CLK_TOP_APLL_I2S3_MCK_SEL>,
+			 <&topckgen CLK_TOP_APLL_I2S4_MCK_SEL>,
+			 <&topckgen CLK_TOP_APLL_I2S5_MCK_SEL>,
+			 <&topckgen CLK_TOP_APLL_I2S6_MCK_SEL>,
+			 <&topckgen CLK_TOP_APLL_I2S7_MCK_SEL>,
+			 <&topckgen CLK_TOP_APLL_I2S8_MCK_SEL>,
+			 <&topckgen CLK_TOP_APLL_I2S9_MCK_SEL>,
+			 <&topckgen CLK_TOP_APLL12_CK_DIV0>,
+			 <&topckgen CLK_TOP_APLL12_CK_DIV1>,
+			 <&topckgen CLK_TOP_APLL12_CK_DIV2>,
+			 <&topckgen CLK_TOP_APLL12_CK_DIV3>,
+			 <&topckgen CLK_TOP_APLL12_CK_DIV4>,
+			 <&topckgen CLK_TOP_APLL12_CK_DIVB>,
+			 <&topckgen CLK_TOP_APLL12_CK_DIV5>,
+			 <&topckgen CLK_TOP_APLL12_CK_DIV6>,
+			 <&topckgen CLK_TOP_APLL12_CK_DIV7>,
+			 <&topckgen CLK_TOP_APLL12_CK_DIV8>,
+			 <&topckgen CLK_TOP_APLL12_CK_DIV9>,
+			 <&topckgen CLK_TOP_AUDIO_H_SEL>,
+			 <&topckgen CLK_TOP_TCK_26M_MX9>;
+		clock-names = "aud_afe_clk", "aud_dac_clk",
+			      "aud_dac_predis_clk", "aud_adc_clk",
+			      "aud_adda6_adc_clk", "aud_apll22m_clk",
+			      "aud_apll24m_clk", "aud_apll1_tuner_clk",
+			      "aud_apll2_tuner_clk", "aud_tdm_clk",
+			      "aud_tml_clk", "aud_nle",
+			      "aud_dac_hires_clk", "aud_adc_hires_clk",
+			      "aud_adc_hires_tml", "aud_adda6_adc_hires_clk",
+			      "aud_3rd_dac_clk", "aud_3rd_dac_predis_clk",
+			      "aud_3rd_dac_tml", "aud_3rd_dac_hires_clk",
+			      "aud_infra_clk", "aud_infra_26m_clk",
+			      "top_mux_audio", "top_mux_audio_int",
+			      "top_mainpll_d4_d4", "top_mux_aud_1",
+			      "top_apll1_ck", "top_mux_aud_2",
+			      "top_apll2_ck", "top_mux_aud_eng1",
+			      "top_apll1_d4", "top_mux_aud_eng2",
+			      "top_apll2_d4", "top_i2s0_m_sel",
+			      "top_i2s1_m_sel", "top_i2s2_m_sel",
+			      "top_i2s3_m_sel", "top_i2s4_m_sel",
+			      "top_i2s5_m_sel", "top_i2s6_m_sel",
+			      "top_i2s7_m_sel", "top_i2s8_m_sel",
+			      "top_i2s9_m_sel", "top_apll12_div0",
+			      "top_apll12_div1", "top_apll12_div2",
+			      "top_apll12_div3", "top_apll12_div4",
+			      "top_apll12_divb", "top_apll12_div5",
+			      "top_apll12_div6", "top_apll12_div7",
+			      "top_apll12_div8", "top_apll12_div9",
+			      "top_mux_audio_h", "top_clk26m_clk";
+	};
+};
+
+/* Audio subsystem MTCMOS: needs the 26 MHz audio bus clocks while the
+ * SRAM power-down acknowledgement is polled (vendor clk-mt6833-pg.c). */
+&spm {
+	power-domain@MT6833_POWER_DOMAIN_AUDIO {
+		reg = <MT6833_POWER_DOMAIN_AUDIO>;
+		clocks = <&topckgen CLK_TOP_AUD_INTBUS_SEL>,
+			 <&infracfg_ao CLK_IFRAO_AUDIO_26M_BCLK>,
+			 <&infracfg_ao CLK_IFRAO_AUDIO>;
+		clock-names = "audio", "audio1", "audio2";
+		#power-domain-cells = <0>;
+	};
+};
+
+/* MT6359 codec: the evergo microphones are DC-coupled (vendor accdet uses
+ * ACC-less low-cost mode 2), so run them in DCC mode like the a22x port. */
+&mt6359codec {
+	mediatek,dmic-mode = <0>;
+	mediatek,mic-type-0 = <3>;
+	mediatek,mic-type-1 = <3>;
+	mediatek,mic-type-2 = <3>;
+};
+
+&pmic {
+	mt6359_accdet: accdet {
+		compatible = "mediatek,mt6359-accdet";
+		mediatek,mic-vol = <8>;
+		mediatek,plugout-debounce = <1>;
+		mediatek,mic-mode = <2>;
+		mediatek,pwm-deb-setting = <0x500 0x500 0x1 0x1f0
+					    0x800 0x800 0x20 0x44
+					    0x4 0x1 0x5 0x3 0x3 0x5 0xe>;
+		mediatek,eint-use-ext-res = <0>;
+		mediatek,key-mode = <0>;
+		mediatek,three-key-thr = <0 80 220 400>;
+		mediatek,four-key-thr = <0 58 121 192 400>;
+		mediatek,tri-key-cdd-thr = <0 121 192 600>;
+	};
+};
+
+/ {
+	sound: sound {
+		compatible = "mediatek,mt6833-mt6359-sound";
+		mediatek,platform = <&afe>;
+		mediatek,accdet = <&mt6359_accdet>;
+		mediatek,speaker-amplifier = <&sia8109_amp>;
+		pinctrl-names = "aud_clk_mosi_off", "aud_clk_mosi_on",
+				"aud_dat_mosi_off", "aud_dat_mosi_on",
+				"aud_dat_miso_off", "aud_dat_miso_on",
+				"aud_gpio_i2s3_off", "aud_gpio_i2s3_on",
+				"aud_gpio_i2s0_off", "aud_gpio_i2s0_on";
+		pinctrl-0 = <&aud_clk_mosi_off>;
+		pinctrl-1 = <&aud_clk_mosi_on>;
+		pinctrl-2 = <&aud_dat_mosi_off>;
+		pinctrl-3 = <&aud_dat_mosi_on>;
+		pinctrl-4 = <&aud_dat_miso_off>;
+		pinctrl-5 = <&aud_dat_miso_on>;
+		pinctrl-6 = <&aud_gpio_i2s3_off>;
+		pinctrl-7 = <&aud_gpio_i2s3_on>;
+		pinctrl-8 = <&aud_gpio_i2s0_off>;
+		pinctrl-9 = <&aud_gpio_i2s0_on>;
+	};
+
+	/*
+	 * SIA8109 analog class-D speaker amplifier.  Its one-wire interface
+	 * (N rising edges after a >1 ms low, then held high) matches the
+	 * AW8738 pulse protocol; mode 6 is the level the vendor driver picks
+	 * for sia81x9.  It is an auxiliary device of the sound card above.
+	 */
+	sia8109_amp: audio-amplifier {
+		compatible = "awinic,aw8738";
+		mode-gpios = <&pio 131 GPIO_ACTIVE_HIGH>;
+		awinic,mode = <6>;
+		sound-name-prefix = "Speaker Amp";
+		pinctrl-names = "default";
+		pinctrl-0 = <&spk_amp_pins>;
 	};
 };
 

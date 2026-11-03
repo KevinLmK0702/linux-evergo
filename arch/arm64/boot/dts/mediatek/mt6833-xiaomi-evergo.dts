@@ -976,3 +976,91 @@
 	};
 };
 
+/*
+ * Haptics: AW8697 LRA driver on the (previously undescribed) i2c9 bus.
+ * Bus data from the vendor mt6833.dts: registers at 0x11d01000, DMA at
+ * 0x10217900, SPI 121, IMPS I2C9 gate, pads GPIO141/142.  The actuator's
+ * reset/OWI line is GPIO132 and its interrupt GPIO6 (vendor evergo.dts).
+ */
+&pio {
+	i2c9_pins: i2c9-pins {
+		pins-scl {
+			pinmux = <PINMUX_GPIO141__FUNC_SCL9>;
+			bias-pull-up;
+		};
+
+		pins-sda {
+			pinmux = <PINMUX_GPIO142__FUNC_SDA9>;
+			bias-pull-up;
+		};
+	};
+
+	aw8697_pins: aw8697-pins {
+		pins-reset {
+			pinmux = <PINMUX_GPIO132__FUNC_GPIO132>;
+			bias-disable;
+			output-high;
+		};
+
+		pins-irq {
+			pinmux = <PINMUX_GPIO6__FUNC_GPIO6>;
+			input-enable;
+			bias-pull-up;
+		};
+	};
+};
+
+&soc {
+	i2c9: i2c@11d01000 {
+		compatible = "mediatek,mt6833-i2c";
+		reg = <0 0x11d01000 0 0x1000>,
+		      <0 0x10217900 0 0x180>;
+		interrupts = <GIC_SPI 121 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&imp_iic_wrap_s CLK_IMPS_AP_CLOCK_RO_I2C9>,
+			 <&infracfg_ao CLK_IFRAO_AP_DMA>;
+		clock-names = "main", "dma";
+		clock-div = <5>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c9_pins>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+
+		aw8697_haptics: haptics@5a {
+			compatible = "awinic,aw8697";
+			reg = <0x5a>;
+			reset-gpios = <&pio 132 GPIO_ACTIVE_LOW>;
+			interrupt-parent = <&pio>;
+			interrupts = <6 IRQ_TYPE_EDGE_FALLING>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&aw8697_pins>;
+
+			/* tuneables from the vendor evergo.dts node */
+			vib_f0_pre = <1700>;
+			vib_f0_coeff = <260>;
+			vib_cont_drv_lev = <96>;
+			vib_cont_drv_lvl_ov = <96>;
+			vib_cont_td = <0x009a>;
+			vib_cont_zc_thr = <0x0ff1>;
+			vib_cont_num_brk = <3>;
+			vib_tset = <0x12>;
+			vib_r_spare = <0x68>;
+			vib_bst_vol_default = <0x10>;
+			vib_bstdbg = <0x30 0xeb 0xd4>;
+			vib_bemf_config = <0x10 0x08 0x03 0xf8>;
+		};
+	};
+};
+
+/* The AW8697 actuator is powered from the MT6359 VIBR LDO. */
+/*
+ * The AW8697 actuator is powered from the MT6359 VIBR LDO.  The LRA boost
+ * reports UVLO at 3.0 V, so use the regulator's top setting (3.3 V) - the
+ * same rail the vendor sets up (vib_vol=9) before starting the motor.
+ */
+&mt6359_vibr_ldo_reg {
+	regulator-min-microvolt = <3300000>;
+	regulator-max-microvolt = <3300000>;
+	regulator-always-on;
+};
+

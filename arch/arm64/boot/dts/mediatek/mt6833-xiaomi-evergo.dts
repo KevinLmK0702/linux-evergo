@@ -675,7 +675,7 @@
 		interrupts = <GIC_SPI 74 IRQ_TYPE_EDGE_RISING>;
 		clocks = <&keypad_clk>;
 		clock-names = "kpd";
-		linux,keymap = <0x00 0x01 115>;		/* KEY_VOLUMEUP */
+		linux,keymap = <0 115>;		/* rows*cols keycodes: (0,0)=none, (0,1)=KEY_VOLUMEUP */
 		keypad,num-rows = <1>;
 		keypad,num-columns = <2>;
 		debounce-delay-ms = <32>;

@@ -109,4 +109,19 @@
 #define MT8196_AP_BOT2                  6
 #define MT8196_AP_BOT3                  7
 
+/* MT6833 */
+#define MT6833_LITTLE_CPU0              0
+#define MT6833_LITTLE_CPU1              1
+#define MT6833_LITTLE_CPU2              2
+#define MT6833_LITTLE_CPU3              3
+#define MT6833_BIG_CPU0                 4
+#define MT6833_BIG_CPU1                 5
+#define MT6833_GPU0                     6
+#define MT6833_GPU1                     7
+#define MT6833_SOC                      8
+#define MT6833_CONSYS                   9
+#define MT6833_MD_4G                    10
+#define MT6833_MD_5G                    11
+#define MT6833_MD_3G                    12
+
 #endif /* __MEDIATEK_LVTS_DT_H */

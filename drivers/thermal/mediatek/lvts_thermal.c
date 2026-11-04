@@ -837,6 +837,24 @@ static int lvts_calibration_init(struct device *dev, struct lvts_ctrl *lvts_ctrl
 	int i, ret;
 	u32 gt;
 
+	/*
+	 * Some SoCs do not provide the LVTS calibration data through a
+	 * nvmem provider. Program the default calibration value in that
+	 * case, matching the fallback the vendor firmware uses when the
+	 * eFuse contains no valid data.
+	 */
+	if (!efuse_calibration || !calib_len) {
+		if (!lvts_data->def_calibration) {
+			dev_err(dev, "No LVTS calibration data and no default given.\n");
+			return -ENODATA;
+		}
+
+		lvts_for_each_valid_sensor(i, lvts_ctrl_data)
+			lvts_ctrl->calibration[i] = lvts_data->def_calibration;
+
+		return 0;
+	}
+
 	/* A zero value for gt means that device has invalid efuse data */
 	gt = (((u32 *)efuse_calibration)[0] >> lvts_data->gt_calib_bit_offset) & 0xff;
 
@@ -918,15 +936,21 @@ static int lvts_calibration_read(struct device *dev, struct lvts_domain *lvts_td
 }
 
 static int lvts_golden_temp_init(struct device *dev, u8 *calib,
+				 size_t calib_len,
 				 const struct lvts_data *lvts_data)
 {
-	u32 gt;
+	u32 gt = 0;
 
 	/*
 	 * The golden temp information is contained in the first 32-bit
-	 * word  of efuse data at a specific bit offset.
+	 * word of efuse data at a specific bit offset. Some SoCs (e.g.
+	 * the MT6833) do not expose the LVTS eFuse through a nvmem
+	 * provider; fall back to the golden temperature used by the
+	 * vendor firmware in that case instead of dereferencing a NULL
+	 * calibration blob.
 	 */
-	gt = (((u32 *)calib)[0] >> lvts_data->gt_calib_bit_offset) & 0xff;
+	if (calib && calib_len >= sizeof(u32))
+		gt = (((u32 *)calib)[0] >> lvts_data->gt_calib_bit_offset) & 0xff;
 
 	/* A zero value for gt means that device has invalid efuse data */
 	if (gt && gt < LVTS_GOLDEN_TEMP_MAX)
@@ -953,7 +977,8 @@ static int lvts_ctrl_init(struct device *dev, struct lvts_domain *lvts_td,
 	if (ret)
 		return ret;
 
-	ret = lvts_golden_temp_init(dev, lvts_td->calib, lvts_data);
+	ret = lvts_golden_temp_init(dev, lvts_td->calib, lvts_td->calib_len,
+				    lvts_data);
 	if (ret)
 		return ret;
 
@@ -991,7 +1016,8 @@ static int lvts_ctrl_init(struct device *dev, struct lvts_domain *lvts_td,
 	/*
 	 * We no longer need the efuse bytes stream, let's free it
 	 */
-	devm_kfree(dev, lvts_td->calib);
+	if (lvts_td->calib)
+		devm_kfree(dev, lvts_td->calib);
 
 	lvts_td->lvts_ctrl = lvts_ctrl;
 	lvts_td->num_lvts_ctrl = lvts_data->num_lvts_ctrl;
@@ -2055,6 +2081,78 @@ static const struct lvts_data mt7988_lvts_ap_data = {
 	.ops = &lvts_platform_ops_mt7988,
 };
 
+/*
+ * The MT6833 (Dimensity 700) has a single AP-domain LVTS block with four
+ * controllers, all reachable through the 0x1100b000 register window:
+ *
+ *   ctrl 0 (0x000): LVTS1-0..3 - little cluster (Cortex-A55) cores
+ *   ctrl 1 (0x100): LVTS2-0..1 - big cluster (Cortex-A76) cores
+ *   ctrl 2 (0x200): LVTS3-0..3 - GPU, GPU, SOC, CONNSYS
+ *   ctrl 3 (0x300): LVTS4-0..2 - modem (4G, 5G, 3G)
+ *
+ * The register layout, the eFuse calibration scheme and the
+ * millidegree conversion coefficients are the same as on the MT8195
+ * family, and the device access sequence matches the MT7988 one.
+ */
+static const u32 mt6833_conn_cmds[] = { 0xC103FFFF, 0xC502FC55 };
+
+static const struct lvts_ctrl_data mt6833_lvts_data_ctrl[] = {
+	{
+		.lvts_sensor = {
+			{ .dt_id = MT6833_LITTLE_CPU0,
+			  .cal_offsets = { 0x00, 0x01, 0x02 } },
+			{ .dt_id = MT6833_LITTLE_CPU1,
+			  .cal_offsets = { 0x03, 0x04, 0x05 } },
+			{ .dt_id = MT6833_LITTLE_CPU2,
+			  .cal_offsets = { 0x06, 0x07, 0x08 } },
+			{ .dt_id = MT6833_LITTLE_CPU3,
+			  .cal_offsets = { 0x09, 0x0a, 0x0b } }
+		},
+		VALID_SENSOR_MAP(1, 1, 1, 1),
+		.offset = 0x0,
+		.mode = LVTS_MSR_FILTERED_MODE,
+	},
+	{
+		.lvts_sensor = {
+			{ .dt_id = MT6833_BIG_CPU0,
+			  .cal_offsets = { 0x0c, 0x0d, 0x0e } },
+			{ .dt_id = MT6833_BIG_CPU1,
+			  .cal_offsets = { 0x0f, 0x10, 0x11 } }
+		},
+		VALID_SENSOR_MAP(1, 1, 0, 0),
+		.offset = 0x100,
+		.mode = LVTS_MSR_FILTERED_MODE,
+	},
+	{
+		.lvts_sensor = {
+			{ .dt_id = MT6833_GPU0,
+			  .cal_offsets = { 0x12, 0x13, 0x14 } },
+			{ .dt_id = MT6833_GPU1,
+			  .cal_offsets = { 0x15, 0x16, 0x17 } },
+			{ .dt_id = MT6833_SOC,
+			  .cal_offsets = { 0x18, 0x19, 0x1a } },
+			{ .dt_id = MT6833_CONSYS,
+			  .cal_offsets = { 0x1b, 0x1c, 0x1d } }
+		},
+		VALID_SENSOR_MAP(1, 1, 1, 1),
+		.offset = 0x200,
+		.mode = LVTS_MSR_FILTERED_MODE,
+	},
+	{
+		.lvts_sensor = {
+			{ .dt_id = MT6833_MD_4G,
+			  .cal_offsets = { 0x1e, 0x1f, 0x20 } },
+			{ .dt_id = MT6833_MD_5G,
+			  .cal_offsets = { 0x21, 0x22, 0x23 } },
+			{ .dt_id = MT6833_MD_3G,
+			  .cal_offsets = { 0x24, 0x25, 0x26 } }
+		},
+		VALID_SENSOR_MAP(1, 1, 1, 0),
+		.offset = 0x300,
+		.mode = LVTS_MSR_FILTERED_MODE,
+	}
+};
+
 static const struct lvts_data mt8186_lvts_data = {
 	.lvts_ctrl	= mt8186_lvts_data_ctrl,
 	.conn_cmd	= default_conn_cmds,
@@ -2184,7 +2282,31 @@ static const struct lvts_data mt8196_lvts_ap_data = {
 	.ops = &lvts_platform_ops_mt8196,
 };
 
+/*
+ * The MT6833 does not expose the LVTS calibration eFuse through a
+ * nvmem provider yet, so the default calibration value (35000) and
+ * the default golden temperature (50 degC) are used. Those are the
+ * same fallback values the vendor thermal driver uses when the eFuse
+ * data is not valid, so the reported temperatures stay in the right
+ * range, at the cost of the per-chip calibration accuracy.
+ */
+static const struct lvts_data mt6833_lvts_data = {
+	.lvts_ctrl	= mt6833_lvts_data_ctrl,
+	.conn_cmd	= mt6833_conn_cmds,
+	.init_cmd	= default_init_cmds,
+	.num_lvts_ctrl	= ARRAY_SIZE(mt6833_lvts_data_ctrl),
+	.num_conn_cmd	= ARRAY_SIZE(mt6833_conn_cmds),
+	.num_init_cmd	= ARRAY_SIZE(default_init_cmds),
+	.temp_factor	= LVTS_COEFF_A_MT8195,
+	.temp_offset	= LVTS_COEFF_B_MT8195,
+	.gt_calib_bit_offset = 24,
+	.def_calibration = 35000,
+	.num_cal_offsets = 3,
+	.ops = &lvts_platform_ops_mt7988,
+};
+
 static const struct of_device_id lvts_of_match[] = {
+	{ .compatible = "mediatek,mt6833-lvts", .data = &mt6833_lvts_data },
 	{ .compatible = "mediatek,mt7987-lvts-ap", .data = &mt7987_lvts_ap_data },
 	{ .compatible = "mediatek,mt7988-lvts-ap", .data = &mt7988_lvts_ap_data },
 	{ .compatible = "mediatek,mt8186-lvts", .data = &mt8186_lvts_data },

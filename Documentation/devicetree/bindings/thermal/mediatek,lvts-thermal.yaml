@@ -18,6 +18,7 @@ description: |
 properties:
   compatible:
     enum:
+      - mediatek,mt6833-lvts
       - mediatek,mt7987-lvts-ap
       - mediatek,mt7988-lvts-ap
       - mediatek,mt8186-lvts
@@ -102,17 +103,28 @@ allOf:
               enum:
                 - mediatek,mt8196-lvts-ap
                 - mediatek,mt8196-lvts-mcu
+                - mediatek,mt6833-lvts
     then:
       required:
         - resets
+
+  - if:
+      properties:
+        compatible:
+          not:
+            contains:
+              enum:
+                - mediatek,mt6833-lvts
+    then:
+      required:
+        - nvmem-cells
+        - nvmem-cell-names
 
 required:
   - compatible
   - reg
   - interrupts
   - clocks
-  - nvmem-cells
-  - nvmem-cell-names
 
 additionalProperties: false
 

@@ -928,10 +928,22 @@ static void mtk_dsi_poweroff(struct mtk_dsi *dsi)
 	 * which needs irq for vblank, and mtk_dsi_stop() will disable irq.
 	 * mtk_dsi_start() needs to be called in mtk_output_dsi_enable(),
 	 * after dsi is fully set.
+	 *
+	 * Leave video mode before the engine is turned off, but do not wait
+	 * for VM_DONE here.  VM_DONE reports that the video frame in flight
+	 * when command mode was requested has been completed, and that frame
+	 * is fed by the display pipeline.  By the time post_disable runs,
+	 * drm_atomic_helper_commit_tail_rpm() has already run the CRTC's
+	 * atomic_disable(), so OVL/RDMA are stopped and the frame can never
+	 * complete: the old "stop, then wait 500 ms for VM_DONE" order
+	 * always times out on MT6833 when blanking, printing
+	 * "Wait DSI IRQ(0x8) Timeout" / "failed to switch cmd mode" and
+	 * stalling the blank for half a second.  Program command mode
+	 * without waiting, then stop and reset the engine: same end state as
+	 * the timeout recovery reached, without the stall.
 	 */
+	mtk_dsi_set_cmd_mode(dsi);
 	mtk_dsi_stop(dsi);
-
-	mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
 	mtk_dsi_reset_engine(dsi);
 	mtk_dsi_lane0_ulp_mode_enter(dsi);
 	mtk_dsi_clk_ulp_mode_enter(dsi);

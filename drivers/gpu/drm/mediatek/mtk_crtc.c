@@ -1017,9 +1017,16 @@ static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
 				   mtk_crtc->cmdq_vblank_cnt == 0,
 				   msecs_to_jiffies(500));
 #endif
-	/* Wait for planes to be disabled */
-	drm_crtc_wait_one_vblank(crtc);
-
+	/*
+	 * Do not wait for a vblank here.  The output pipeline is being torn
+	 * down (phoc blanks the CRTC on power-key / idle), and by the time
+	 * this callback runs the DSI/TE may already be off, so no further
+	 * vblank interrupts arrive: the previous wait_one_vblank() timed out
+	 * (~200 ms), vblank_off() then failed to flush the pending commit and
+	 * the atomic helper reported "commit wait timed out" ~25 s later.
+	 * Turn vblank off first (it flushes pending vblank/commit events) and
+	 * let mtk_crtc_ddp_hw_fini() complete the CRTC event below.
+	 */
 	drm_crtc_vblank_off(crtc);
 	mtk_crtc_ddp_hw_fini(mtk_crtc);
 	mtk_ddp_comp_power_off(comp);

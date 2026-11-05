@@ -156,11 +156,22 @@ static const struct mtk_fixed_factor top_divs[] = {
 	FACTOR(CLK_TOP_MAINPLL_D4_D8, "mainpll_d4_d8", "mainpll", 1, 32),
 	FACTOR(CLK_TOP_MAINPLL_D4_D16, "mainpll_d4_d16", "mainpll", 1, 64),
 	FACTOR(CLK_TOP_MAINPLL_D5, "mainpll_d5", "mainpll", 1, 5),
-	FACTOR(CLK_TOP_MAINPLL_D5_D2, "mainpll_d5_d2", "mainpll", 1, 10),
+	/*
+	 * GPU DVFS: mfg_ref_sel (the MFG bypass mux) can select these shared
+	 * MAINPLL dividers.  Do not let a GPU rate request propagate through
+	 * them into MAINPLL, otherwise clk_mux_determine_rate_flags() may elect
+	 * mfg_ref_sel as the best parent for the GPU clock (its chain can then
+	 * promise any rate) and MAINPLL -- shared with display and the rest of
+	 * the AP -- would be reprogrammed to the GPU OPP rate.  MFGPLL is the
+	 * only PLL the GPU clock may retune; keep CLK_SET_RATE_PARENT on it.
+	 * (Same reasoning as the a22x-mainline MT6833 port, scoped to the three
+	 * parents that mfg_ref_sel can actually reach.)
+	 */
+	FACTOR_FLAGS(CLK_TOP_MAINPLL_D5_D2, "mainpll_d5_d2", "mainpll", 1, 10, 0),
 	FACTOR(CLK_TOP_MAINPLL_D5_D4, "mainpll_d5_d4", "mainpll", 1, 20),
 	FACTOR(CLK_TOP_MAINPLL_D5_D8, "mainpll_d5_d8", "mainpll", 1, 40),
-	FACTOR(CLK_TOP_MAINPLL_D6, "mainpll_d6", "mainpll", 1, 6),
-	FACTOR(CLK_TOP_MAINPLL_D6_D2, "mainpll_d6_d2", "mainpll", 1, 12),
+	FACTOR_FLAGS(CLK_TOP_MAINPLL_D6, "mainpll_d6", "mainpll", 1, 6, 0),
+	FACTOR_FLAGS(CLK_TOP_MAINPLL_D6_D2, "mainpll_d6_d2", "mainpll", 1, 12, 0),
 	FACTOR(CLK_TOP_MAINPLL_D6_D4, "mainpll_d6_d4", "mainpll", 1, 24),
 	FACTOR(CLK_TOP_MAINPLL_D6_D8, "mainpll_d6_d8", "mainpll", 1, 48),
 	FACTOR(CLK_TOP_MAINPLL_D7, "mainpll_d7", "mainpll", 1, 7),
@@ -1331,6 +1342,33 @@ static const struct mtk_composite top_composites[] = {
 		16),
 };
 
+/*
+ * The GPU clock is fed by mfg_pll_sel, which selects either mfg_ref_sel or
+ * MFGPLL.  GPU DVFS reprograms MFGPLL, so park mfg_pll_sel on its bypass
+ * input (mfg_ref_sel, index 0) for the duration of the rate change, exactly
+ * like the MT8183/MT8186/MT8192 MFG mux notifiers.
+ */
+static int clk_mt6833_reg_mfg_mux_notifier(struct device *dev, struct clk *clk)
+{
+	struct mtk_mux_nb *mfg_mux_nb;
+	int i;
+
+	mfg_mux_nb = devm_kzalloc(dev, sizeof(*mfg_mux_nb), GFP_KERNEL);
+	if (!mfg_mux_nb)
+		return -ENOMEM;
+
+	for (i = 0; i < ARRAY_SIZE(top_muxes); i++)
+		if (top_muxes[i].id == CLK_TOP_MFG_PLL_SEL)
+			break;
+	if (i == ARRAY_SIZE(top_muxes))
+		return -EINVAL;
+
+	mfg_mux_nb->ops = top_muxes[i].ops;
+	mfg_mux_nb->bypass_index = 0; /* mfg_ref_sel */
+
+	return devm_mtk_clk_mux_notifier_register(dev, clk, mfg_mux_nb);
+}
+
 static const struct mtk_clk_desc topckgen_desc = {
 	.fixed_clks = top_fixed_clks,
 	.num_fixed_clks = ARRAY_SIZE(top_fixed_clks),
@@ -1341,6 +1379,8 @@ static const struct mtk_clk_desc topckgen_desc = {
 	.composite_clks = top_composites,
 	.num_composite_clks = ARRAY_SIZE(top_composites),
 	.clk_lock = &mt6833_topckgen_lock,
+	.clk_notifier_func = clk_mt6833_reg_mfg_mux_notifier,
+	.mfg_clk_idx = CLK_TOP_MFG_PLL_SEL,
 };
 
 static const struct of_device_id of_match_clk_mt6833_topckgen[] = {

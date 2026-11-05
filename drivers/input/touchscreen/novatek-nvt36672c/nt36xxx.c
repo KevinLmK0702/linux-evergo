@@ -1700,7 +1700,21 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 	 * CSOT (see the panel node in the evergo dts), and running the Tianma
 	 * blob on it shifted every button of the right-hand PIN column up by
 	 * one row. */
-	char firmware_name[] = "novatek_ts_ct_fw.bin";
+	/* evergo: the two panel variants need different touch blobs.  Pick by the
+	 * panel node actually present in the DT instead of hardcoding the blob for
+	 * the author's CSOT unit: running the CSOT blob on a Tianma panel leaves a
+	 * dead strip on the right-hand side of the screen (the geometry is
+	 * shifted), which is exactly what happened on a Tianma unit. */
+	char firmware_name[32];
+	struct device_node *panel_np;
+
+	panel_np = of_find_compatible_node(NULL, NULL, "k16a_36_02_0a_vdo,lcm");
+	if (panel_np) {
+		scnprintf(firmware_name, sizeof(firmware_name), "novatek_ts_fw.bin");
+		of_node_put(panel_np);
+	} else {
+		scnprintf(firmware_name, sizeof(firmware_name), "novatek_ts_ct_fw.bin");
+	}
 #if ((TOUCH_KEY_NUM > 0) || WAKEUP_GESTURE)
 	int32_t retry = 0;
 #endif
@@ -2489,6 +2503,21 @@ static const struct of_device_id nvt_match_table[] = {
 };
 #endif
 
+
+/* evergo: system sleep support.
+ *
+ * The driver had suspend/resume functions (deep-sleep host command 0x11,
+ * TP_RST pulse on resume) but they were only reachable through the removed
+ * early-suspend/fb-notifier paths, so a system suspend left the controller
+ * deaf: after s2idle resume the EINT line never fired again and touch stayed
+ * dead until the SPI device was rebound.  Wire the same functions into the
+ * standard dev_pm_ops so suspend/resume always runs.
+ */
+static const struct dev_pm_ops nvt_ts_pm_ops = {
+	.suspend = nvt_ts_suspend,
+	.resume = nvt_ts_resume,
+};
+
 static struct spi_driver nvt_spi_driver = {
 	.probe = nvt_ts_probe,
 	.remove = nvt_ts_remove,
@@ -2500,6 +2529,7 @@ static struct spi_driver nvt_spi_driver = {
 #ifdef CONFIG_OF
 		   .of_match_table = nvt_match_table,
 #endif
+		   .pm = &nvt_ts_pm_ops,
 		   },
 };
 

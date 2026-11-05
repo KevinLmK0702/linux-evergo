@@ -593,21 +593,33 @@
 	status = "okay";
 
 	/*
-	 * Vendor GPU rails on this board (MT6359): VPROC1 buck is the GPU
-	 * core rail (vendor _vgpu), VSRAM_MD LDO the GPU SRAM one
-	 * (vendor _vsram_gpu).
+	 * GPU DVFS: only the core rail is described here, and the OPP table
+	 * below keeps it at a fixed 0.78125 V for every frequency, so devfreq
+	 * changes the MFGPLL rate only and never the voltage.
+	 *
+	 * The GPU SRAM rail (vendor _vsram_gpu, MT6359 VSRAM_MD LDO) is *not*
+	 * a device supply: it belongs to the MFG1 power domain (domain-supply
+	 * below), which mtk-pm-domains enables before the MTCMOS handshake,
+	 * as on the upstream mt8183b/mt8186/mt8188 MediaTek GPUs.  Listing it
+	 * here as well would give panfrost two OPP regulators, and panfrost
+	 * then refuses to start devfreq ("More than 1 supply is not supported
+	 * yet") because the OPP core needs per-supply voltages for that.
 	 */
 	mali-supply = <&mt6359_vproc1_buck_reg>;
-	sram-supply = <&mt6359_vsram_md_ldo_reg>;
 	operating-points-v2 = <&gpu_opp_table>;
 };
 
 /*
- * GPU OPP table: the vendor voltages rely on EEMG calibration, which mainline
- * does not do.  Running them uncalibrated makes panfrost fault (JOB_READ_FAULT,
- * AS1 translation faults, job timeouts) and compositors fall back to software
- * rendering.  The a22x-mainline port of the same MT6833 found a fixed 0.78125 V
- * core rail plus 0.85 V GPU SRAM clean on every boot, so use that for all OPPs.
+ * GPU OPP table (DVFS 390-955 MHz): the vendor voltages rely on EEMG
+ * calibration, which mainline does not do.  Running them uncalibrated makes
+ * panfrost fault (JOB_READ_FAULT, AS1 translation faults, job timeouts) and
+ * compositors fall back to software rendering.  The a22x-mainline port of the
+ * same MT6833 found a fixed 0.78125 V core rail plus 0.85 V GPU SRAM clean on
+ * every boot, so use that for all OPPs: DVFS only changes the MFGPLL rate.
+ *
+ * 955 MHz is the ceiling: MFGPLL_CON1 ignores PCW values above the 955 MHz
+ * setting on this chip (the Dimensity 700 GPU is rated for 950 MHz), so the
+ * vendor 1000/1068 MHz entries are deliberately left out.
  */
 &{/} {
 	gpu_opp_table: opp-table-gpu {
@@ -621,7 +633,6 @@
 		opp-700000000 { opp-hz = /bits/ 64 <700000000>; opp-microvolt = <781250>; };
 		opp-790000000 { opp-hz = /bits/ 64 <790000000>; opp-microvolt = <781250>; };
 		opp-880000000 { opp-hz = /bits/ 64 <880000000>; opp-microvolt = <781250>; };
-		opp-955000000 { opp-hz = /bits/ 64 <955000000>; opp-microvolt = <781250>; };
 	};
 };
 
@@ -637,6 +648,10 @@
  * mirroring the vendor gpufreq order (vgpu/vsram_gpu first, then mtcmos).
  * Same layout as mt8188-geralt upstream: core rail on mfg0, SRAM rail
  * on mfg1.  Vendor names: _vgpu = VPROC1 buck, _vsram_gpu = VSRAM_MD.
+ *
+ * mfg1 is the only owner of the GPU SRAM rail (the gpu node no longer
+ * claims it as a device supply), and only mfg0's core rail is exposed to
+ * panfrost as "mali" for the OPP core to keep at 0.78125 V.
  */
 &mfg0 {
 	domain-supply = <&mt6359_vproc1_buck_reg>;

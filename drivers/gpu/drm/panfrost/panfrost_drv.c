@@ -1153,11 +1153,17 @@ static const struct panfrost_compatible mediatek_mt8370_data = {
 	.gpu_quirks = BIT(GPU_QUIRK_FORCE_AARCH64_PGTABLE),
 };
 
-static const char * const mt6833_supplies[] = { "mali", "sram", NULL };
-
+/*
+ * MT6833: one GPU supply.  The SRAM rail is a power-domain supply (the MFG1
+ * domain's domain-supply) rather than a device regulator, like the mt8183b /
+ * mt8186 / mt8188 MediaTek GPUs.  With two device supplies panfrost_devfreq
+ * bails out ("More than 1 supply is not supported yet") and GPU DVFS stays
+ * disabled; the OPP core would also require per-supply voltages in the OPP
+ * table, which this board does not have (fixed 0.78125 V / 0.85 V).
+ */
 static const struct panfrost_compatible mediatek_mt6833_data = {
-	.num_supplies = ARRAY_SIZE(mt6833_supplies) - 1,
-	.supply_names = mt6833_supplies,
+	.num_supplies = ARRAY_SIZE(default_supplies) - 1,
+	.supply_names = default_supplies,
 	.num_pm_domains = 2,
 	.pm_domain_names = mediatek_pm_domains,
 	.gpu_quirks = BIT(GPU_QUIRK_FORCE_AARCH64_PGTABLE),

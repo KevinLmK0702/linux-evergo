@@ -132,7 +132,7 @@ static int mt6359_fg_car_uah(struct mt6359_fg *fg, s64 *uah)
 
 static int mt6359_fg_voltage_uv(struct mt6359_fg *fg, int *uv)
 {
-	int ret = iio_read_channel_processed_scale(fg->vbat, uv, 1000);
+	int ret = iio_read_channel_processed(fg->vbat, uv);
 
 	return ret < 0 ? ret : 0;
 }

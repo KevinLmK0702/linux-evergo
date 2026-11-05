@@ -160,6 +160,7 @@ struct lvts_data {
 	int gt_calib_bit_offset;
 	unsigned int def_calibration;
 	u16 msr_offset;
+	bool context_lost_in_suspend;
 };
 
 struct lvts_sensor {
@@ -172,6 +173,14 @@ struct lvts_sensor {
 	int high_thresh;
 };
 
+struct lvts_suspend_context {
+	u32 monctl0;
+	u32 msrctl1;
+	u32 offsetl;
+	u32 offseth;
+	u32 monint;
+};
+
 struct lvts_ctrl {
 	struct lvts_sensor sensors[LVTS_SENSOR_MAX];
 	const struct lvts_data *lvts_data;
@@ -181,6 +190,7 @@ struct lvts_ctrl {
 	void __iomem *base;
 	int low_thresh;
 	int high_thresh;
+	struct lvts_suspend_context suspend_context;
 };
 
 struct lvts_domain {
@@ -1593,6 +1603,60 @@ static const struct lvts_ctrl_data mt7988_lvts_ap_data_ctrl[] = {
 	}
 };
 
+static void lvts_ctrl_save_context(struct lvts_ctrl *lvts_ctrl)
+{
+	struct lvts_suspend_context *ctx = &lvts_ctrl->suspend_context;
+	void __iomem *base = lvts_ctrl->base;
+
+	ctx->monctl0 = readl(LVTS_MONCTL0(base));
+	/* Keep the enable bits, not the read-only measurement status bits. */
+	ctx->msrctl1 = readl(LVTS_MSRCTL1(base)) &
+		       (BIT(4) | BIT(5) | BIT(6) | BIT(9));
+	ctx->offsetl = readl(LVTS_OFFSETL(base));
+	ctx->offseth = readl(LVTS_OFFSETH(base));
+	ctx->monint = readl(LVTS_MONINT(base));
+}
+
+static int lvts_ctrl_restore_context(struct device *dev,
+				     struct lvts_ctrl *lvts_ctrl)
+{
+	struct lvts_suspend_context *ctx = &lvts_ctrl->suspend_context;
+	void __iomem *base = lvts_ctrl->base;
+	int ret;
+
+	/*
+	 * The MT6833 firmware may reset the LVTS devices and controller
+	 * while the SoC is in its deepest system sleep state: redo the
+	 * probe bring-up sequence instead of only re-enabling the monitor.
+	 */
+	writel(0, LVTS_MONINT(base));
+
+	ret = lvts_ctrl_connect(dev, lvts_ctrl);
+	if (ret)
+		return ret;
+
+	ret = lvts_ctrl_initialize(dev, lvts_ctrl);
+	if (ret)
+		return ret;
+
+	ret = lvts_ctrl_calibrate(dev, lvts_ctrl);
+	if (ret)
+		return ret;
+
+	ret = lvts_ctrl_configure(dev, lvts_ctrl);
+	if (ret)
+		return ret;
+
+	/* Restore the hardware state without registering the zones again. */
+	writel(ctx->offsetl, LVTS_OFFSETL(base));
+	writel(ctx->offseth, LVTS_OFFSETH(base));
+	writel(ctx->msrctl1, LVTS_MSRCTL1(base));
+	writel(ctx->monctl0, LVTS_MONCTL0(base));
+	writel(ctx->monint, LVTS_MONINT(base));
+
+	return 0;
+}
+
 static int lvts_suspend(struct device *dev)
 {
 	struct lvts_domain *lvts_td;
@@ -1601,6 +1665,8 @@ static int lvts_suspend(struct device *dev)
 	lvts_td = dev_get_drvdata(dev);
 
 	for (i = 0; i < lvts_td->num_lvts_ctrl; i++) {
+		if (lvts_td->lvts_ctrl[i].lvts_data->context_lost_in_suspend)
+			lvts_ctrl_save_context(&lvts_td->lvts_ctrl[i]);
 		lvts_ctrl_monitor_enable(dev, &lvts_td->lvts_ctrl[i], false);
 		usleep_range(100, 200);
 		lvts_ctrl_set_enable(&lvts_td->lvts_ctrl[i], false);
@@ -1625,10 +1691,27 @@ static int lvts_resume(struct device *dev)
 	for (i = 0; i < lvts_td->num_lvts_ctrl; i++) {
 		lvts_ctrl_set_enable(&lvts_td->lvts_ctrl[i], true);
 		usleep_range(100, 200);
-		lvts_ctrl_monitor_enable(dev, &lvts_td->lvts_ctrl[i], true);
+		if (lvts_td->lvts_ctrl[i].lvts_data->context_lost_in_suspend) {
+			ret = lvts_ctrl_restore_context(dev, &lvts_td->lvts_ctrl[i]);
+			if (ret) {
+				dev_err(dev, "Failed to restore LVTS controller %d: %d\n",
+					i, ret);
+				goto disable_controllers;
+			}
+		} else {
+			lvts_ctrl_monitor_enable(dev, &lvts_td->lvts_ctrl[i], true);
+		}
 	}
 
 	return 0;
+
+disable_controllers:
+	for (i = 0; i < lvts_td->num_lvts_ctrl; i++)
+		lvts_ctrl_set_enable(&lvts_td->lvts_ctrl[i], false);
+
+	clk_disable_unprepare(lvts_td->clk);
+
+	return ret;
 }
 
 static const u32 default_conn_cmds[] = { 0xC103FFFF, 0xC502FF55 };
@@ -2303,6 +2386,7 @@ static const struct lvts_data mt6833_lvts_data = {
 	.def_calibration = 35000,
 	.num_cal_offsets = 3,
 	.ops = &lvts_platform_ops_mt7988,
+	.context_lost_in_suspend = true,
 };
 
 static const struct of_device_id lvts_of_match[] = {

@@ -653,5 +653,11 @@
 #define CLK_MDP_IMG_DL_RELAY1_ASYNC1	19
 #define CLK_MDP_NR_CLK			20
 
+/* MCUSYS (mainline addition, not in the vendor header) */
+#define CLK_MCU_ARMPLL_LL_SEL		0
+#define CLK_MCU_ARMPLL_BL_SEL		1
+#define CLK_MCU_ARMPLL_BUS_SEL		2
+#define CLK_MCU_NR_CLK			3
+
 #endif /* _DT_BINDINGS_CLOCK_MEDIATEK_MT6833_H */
 

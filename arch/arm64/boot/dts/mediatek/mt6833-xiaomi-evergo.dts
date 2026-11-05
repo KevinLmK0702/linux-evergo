@@ -59,7 +59,7 @@
 		 *   KMS: DRM_IOCTL_MODE_CREATE_DUMB failed: Out of memory
 		 * 256 MB is comfortable on this 8 GiB unit.
 		 */
-		bootargs = "earlycon=mtk8250,0x11002000 console=evenring console=ttyS0,921600n8 console=tty0 loglevel=4 printk.devkmsg=on clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=10 watchdog_thresh=30 initcall_blacklist=exynos4_pm_init_power_domain fbcon=nodefer cma=256M";
+		bootargs = "earlycon=mtk8250,0x11002000 console=evenring console=ttyS0,921600n8 console=tty0 loglevel=4 printk.devkmsg=on mem_sleep_default=s2idle clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=10 watchdog_thresh=30 initcall_blacklist=exynos4_pm_init_power_domain fbcon=nodefer cma=256M";
 		stdout-path = "serial0:921600n8";
 	};
 
@@ -1354,4 +1354,284 @@
 		#size-cells = <0>;
 		status = "okay";
 	};
+};
+
+/*
+ * ---------------------------------------------------------------------
+ * CPU DVFS: mediatek-cpufreq retunes the cluster PLLs in APMIXEDSYS
+ * itself (switching the mcusys CPU_PLLDIV_CFG muxes to clk26m while a
+ * PLL is changed) instead of the vendor CPUHVFS/MCUPM firmware path.
+ *
+ * Ported from the a22x-mainline MT6833 port, which runs the same SoC:
+ * the frequencies and voltages are the vendor B20G level's unadjusted
+ * (pre-EEM) values. That is the conservative set for a chip whose EEM
+ * calibration table mainline cannot read.
+ *
+ * LITTLE stops at 950 MHz / 0.725 V because the CCI (675 MHz, needs
+ * 0.725 V) shares Vproc2 with it and is not scaled yet. The big cluster
+ * has its own VGPU11 rail and goes up to 2.0 GHz / 0.99375 V.
+ *
+ * The a22x tree later qualified its own unit further (2.203 GHz at
+ * 0.9 V plus CCI DVFS). That is per-device EEM-style data, so it is
+ * deliberately not copied here: a 2.087/2.203 GHz pair can be appended
+ * to cluster1_opp after hardware validation, keeping the CCI at
+ * >= 975 MHz / 0.825 V whenever the big cluster is above 2.0 GHz.
+ */
+/ {
+	mcusys: syscon@c53a000 {
+		compatible = "mediatek,mt6833-mcusys", "syscon";
+		reg = <0 0x0c53a000 0 0x1000>;
+		#clock-cells = <1>;
+	};
+
+	cluster0_opp: opp-table-cluster0 {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		opp-950000000 {
+			opp-hz = /bits/ 64 <950000000>;
+			opp-microvolt = <725000>;
+		};
+
+		opp-1032000000 {
+			opp-hz = /bits/ 64 <1032000000>;
+			opp-microvolt = <743750>;
+		};
+
+		opp-1115000000 {
+			opp-hz = /bits/ 64 <1115000000>;
+			opp-microvolt = <762500>;
+		};
+
+		opp-1280000000 {
+			opp-hz = /bits/ 64 <1280000000>;
+			opp-microvolt = <800000>;
+		};
+
+		opp-1390000000 {
+			opp-hz = /bits/ 64 <1390000000>;
+			opp-microvolt = <825000>;
+		};
+
+		opp-1500000000 {
+			opp-hz = /bits/ 64 <1500000000>;
+			opp-microvolt = <850000>;
+		};
+
+		opp-1645000000 {
+			opp-hz = /bits/ 64 <1645000000>;
+			opp-microvolt = <893750>;
+		};
+
+		opp-1750000000 {
+			opp-hz = /bits/ 64 <1750000000>;
+			opp-microvolt = <925000>;
+		};
+
+		opp-1812000000 {
+			opp-hz = /bits/ 64 <1812000000>;
+			opp-microvolt = <943750>;
+		};
+
+		opp-1916000000 {
+			opp-hz = /bits/ 64 <1916000000>;
+			opp-microvolt = <975000>;
+		};
+
+		opp-2000000000 {
+			opp-hz = /bits/ 64 <2000000000>;
+			opp-microvolt = <1000000>;
+		};
+	};
+
+	cluster1_opp: opp-table-cluster1 {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		opp-725000000 {
+			opp-hz = /bits/ 64 <725000000>;
+			opp-microvolt = <650000>;
+		};
+
+		opp-840000000 {
+			opp-hz = /bits/ 64 <840000000>;
+			opp-microvolt = <681250>;
+		};
+
+		opp-898000000 {
+			opp-hz = /bits/ 64 <898000000>;
+			opp-microvolt = <700000>;
+		};
+
+		opp-985000000 {
+			opp-hz = /bits/ 64 <985000000>;
+			opp-microvolt = <725000>;
+		};
+
+		opp-1042000000 {
+			opp-hz = /bits/ 64 <1042000000>;
+			opp-microvolt = <737500>;
+		};
+
+		opp-1129000000 {
+			opp-hz = /bits/ 64 <1129000000>;
+			opp-microvolt = <756250>;
+		};
+
+		opp-1274000000 {
+			opp-hz = /bits/ 64 <1274000000>;
+			opp-microvolt = <800000>;
+		};
+
+		opp-1418000000 {
+			opp-hz = /bits/ 64 <1418000000>;
+			opp-microvolt = <843750>;
+		};
+
+		opp-1534000000 {
+			opp-hz = /bits/ 64 <1534000000>;
+			opp-microvolt = <875000>;
+		};
+
+		opp-1650000000 {
+			opp-hz = /bits/ 64 <1650000000>;
+			opp-microvolt = <906250>;
+		};
+
+		opp-1720000000 {
+			opp-hz = /bits/ 64 <1720000000>;
+			opp-microvolt = <925000>;
+		};
+
+		opp-1790000000 {
+			opp-hz = /bits/ 64 <1790000000>;
+			opp-microvolt = <943750>;
+		};
+
+		opp-1836000000 {
+			opp-hz = /bits/ 64 <1836000000>;
+			opp-microvolt = <950000>;
+		};
+
+		opp-1906000000 {
+			opp-hz = /bits/ 64 <1906000000>;
+			opp-microvolt = <968750>;
+		};
+
+		opp-1953000000 {
+			opp-hz = /bits/ 64 <1953000000>;
+			opp-microvolt = <981250>;
+		};
+
+		opp-2000000000 {
+			opp-hz = /bits/ 64 <2000000000>;
+			opp-microvolt = <993750>;
+		};
+	};
+};
+
+/*
+ * CPU rails (vendor mapping on MT6833): big cluster = VGPU11 + VSRAM_PROC1,
+ * LITTLE + CCI = VPROC2 + VSRAM_PROC2. Cap them at the vendor Vproc/Vsram
+ * ceiling (1.0 V) and keep them enabled; nothing changes until cpufreq asks
+ * for an OPP, and they are never switched off behind the CPU's back.
+ */
+&mt6359_vgpu11_buck_reg {
+	regulator-min-microvolt = <600000>;
+	regulator-max-microvolt = <1000000>;
+	regulator-always-on;
+};
+
+&mt6359_vproc2_buck_reg {
+	regulator-min-microvolt = <600000>;
+	regulator-max-microvolt = <1000000>;
+	regulator-always-on;
+};
+
+&mt6359_vsram_proc1_ldo_reg {
+	regulator-min-microvolt = <750000>;
+	regulator-max-microvolt = <1000000>;
+	regulator-always-on;
+};
+
+&mt6359_vsram_proc2_ldo_reg {
+	regulator-min-microvolt = <750000>;
+	regulator-max-microvolt = <1000000>;
+	regulator-always-on;
+};
+
+/*
+ * Cortex-A55 is about 383/1024 of a Cortex-A76 per MHz; without this the
+ * scheduler treats all eight CPUs as equally capable.
+ */
+&cpu0 {
+	capacity-dmips-mhz = <383>;
+	clocks = <&mcusys CLK_MCU_ARMPLL_LL_SEL>, <&clk26m>;
+	clock-names = "cpu", "intermediate";
+	operating-points-v2 = <&cluster0_opp>;
+	proc-supply = <&mt6359_vproc2_buck_reg>;
+	sram-supply = <&mt6359_vsram_proc2_ldo_reg>;
+};
+
+&cpu1 {
+	capacity-dmips-mhz = <383>;
+	clocks = <&mcusys CLK_MCU_ARMPLL_LL_SEL>, <&clk26m>;
+	clock-names = "cpu", "intermediate";
+	operating-points-v2 = <&cluster0_opp>;
+	proc-supply = <&mt6359_vproc2_buck_reg>;
+	sram-supply = <&mt6359_vsram_proc2_ldo_reg>;
+};
+
+&cpu2 {
+	capacity-dmips-mhz = <383>;
+	clocks = <&mcusys CLK_MCU_ARMPLL_LL_SEL>, <&clk26m>;
+	clock-names = "cpu", "intermediate";
+	operating-points-v2 = <&cluster0_opp>;
+	proc-supply = <&mt6359_vproc2_buck_reg>;
+	sram-supply = <&mt6359_vsram_proc2_ldo_reg>;
+};
+
+&cpu3 {
+	capacity-dmips-mhz = <383>;
+	clocks = <&mcusys CLK_MCU_ARMPLL_LL_SEL>, <&clk26m>;
+	clock-names = "cpu", "intermediate";
+	operating-points-v2 = <&cluster0_opp>;
+	proc-supply = <&mt6359_vproc2_buck_reg>;
+	sram-supply = <&mt6359_vsram_proc2_ldo_reg>;
+};
+
+&cpu4 {
+	capacity-dmips-mhz = <383>;
+	clocks = <&mcusys CLK_MCU_ARMPLL_LL_SEL>, <&clk26m>;
+	clock-names = "cpu", "intermediate";
+	operating-points-v2 = <&cluster0_opp>;
+	proc-supply = <&mt6359_vproc2_buck_reg>;
+	sram-supply = <&mt6359_vsram_proc2_ldo_reg>;
+};
+
+&cpu5 {
+	capacity-dmips-mhz = <383>;
+	clocks = <&mcusys CLK_MCU_ARMPLL_LL_SEL>, <&clk26m>;
+	clock-names = "cpu", "intermediate";
+	operating-points-v2 = <&cluster0_opp>;
+	proc-supply = <&mt6359_vproc2_buck_reg>;
+	sram-supply = <&mt6359_vsram_proc2_ldo_reg>;
+};
+
+&cpu6 {
+	capacity-dmips-mhz = <1024>;
+	clocks = <&mcusys CLK_MCU_ARMPLL_BL_SEL>, <&clk26m>;
+	clock-names = "cpu", "intermediate";
+	operating-points-v2 = <&cluster1_opp>;
+	proc-supply = <&mt6359_vgpu11_buck_reg>;
+	sram-supply = <&mt6359_vsram_proc1_ldo_reg>;
+};
+
+&cpu7 {
+	capacity-dmips-mhz = <1024>;
+	clocks = <&mcusys CLK_MCU_ARMPLL_BL_SEL>, <&clk26m>;
+	clock-names = "cpu", "intermediate";
+	operating-points-v2 = <&cluster1_opp>;
+	proc-supply = <&mt6359_vgpu11_buck_reg>;
+	sram-supply = <&mt6359_vsram_proc1_ldo_reg>;
 };

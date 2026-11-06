@@ -118,7 +118,7 @@
 
 		/* Framebuffer shared with the bootloader (LK) */
 		framebuffer_reserved: memory@7c610000 {
-			reg = <0 0x7c610000 0 0x1df0000>;
+			reg = <0 0x7cf10000 0 0x1df0000>;
 		};
 
 		minirdump: memory@48170000 {
@@ -160,7 +160,7 @@
 		};
 
 		mcupm_reserved: memory@7f500000 {
-			reg = <0 0x7f500000 0 0x100000>;
+			reg = <0 0x7ed00000 0 0x100000>;
 			no-map;
 		};
 
@@ -170,7 +170,7 @@
 		};
 
 		tee_ree_reserved: memory@7e400000 {
-			reg = <0 0x7e400000 0 0xc00000>;
+			reg = <0 0x7ee00000 0 0xc00000>;
 			no-map;
 		};
 
@@ -185,7 +185,7 @@
 		};
 
 		tee_secmem: memory@7f000000 {
-			reg = <0 0x7f000000 0 0x400000>;
+			reg = <0 0x7fa00000 0 0x400000>;
 			no-map;
 		};
 
@@ -230,6 +230,81 @@
 
 		dramc_rk1: memory@23ffff000 {
 			reg = <2 0x3ffff000 0 0x1000>;
+			no-map;
+		};
+		/* reserved by LK at boot (mblock); must not be used by Linux */
+		memory@6c000000 {
+			reg = <0 0x6c000000 0 0x2960000>;
+			no-map;
+		};
+		/* reserved by LK at boot (mblock); must not be used by Linux */
+		memory@7a000000 {
+			reg = <0 0x7a000000 0 0x1b0000>;
+			no-map;
+		};
+		/* reserved by LK at boot (mblock); must not be used by Linux */
+		memory@9a090000 {
+			reg = <0 0x9a090000 0 0x480000>;
+			no-map;
+		};
+		/* reserved by LK at boot (mblock); must not be used by Linux */
+		memory@98000000 {
+			reg = <0 0x98000000 0 0x2090000>;
+			no-map;
+		};
+		/* reserved by LK at boot (mblock); must not be used by Linux */
+		memory@9a510000 {
+			reg = <0 0x9a510000 0 0x10000>;
+			no-map;
+		};
+		/* reserved by LK at boot (mblock); must not be used by Linux */
+		memory@9b000000 {
+			reg = <0 0x9b000000 0 0x150000>;
+			no-map;
+		};
+		/* reserved by LK at boot (mblock); must not be used by Linux */
+		memory@9c000000 {
+			reg = <0 0x9c000000 0 0x79b0000>;
+			no-map;
+		};
+		/* reserved by LK at boot (mblock); must not be used by Linux */
+		memory@b3bd0000 {
+			reg = <0 0xb3bd0000 0 0x1730000>;
+			no-map;
+		};
+		/* reserved by LK at boot (mblock); must not be used by Linux */
+		memory@bff60000 {
+			reg = <0 0xbff60000 0 0x10000>;
+			no-map;
+		};
+		/* reserved by LK at boot (mblock); must not be used by Linux */
+		memory@b9400000 {
+			reg = <0 0xb9400000 0 0x400000>;
+			no-map;
+		};
+		/* reserved by LK at boot (mblock); must not be used by Linux */
+		memory@77ff0000 {
+			reg = <0 0x77ff0000 0 0x10000>;
+			no-map;
+		};
+		/* reserved by LK at boot (mblock); must not be used by Linux */
+		memory@d0000000 {
+			reg = <0 0xd0000000 0 0x200000>;
+			no-map;
+		};
+		/* reserved by LK at boot (mblock); must not be used by Linux */
+		memory@d0200000 {
+			reg = <0 0xd0200000 0 0x200000>;
+			no-map;
+		};
+		/* reserved by LK at boot (mblock); must not be used by Linux */
+		memory@1bffff000 {
+			reg = <0 0x1bffff000 0 0x1000>;
+			no-map;
+		};
+		/* reserved by LK at boot (mblock); must not be used by Linux */
+		memory@bffff000 {
+			reg = <0 0xbffff000 0 0x1000>;
 			no-map;
 		};
 	};
